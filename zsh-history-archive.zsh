@@ -170,7 +170,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
 
   __zhistarchive_write() {
     emulate -L zsh
-    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} -eq 0 )) || return 0
+    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
     local line="$1"
 
     if (( __zhistarchive_writing )); then
@@ -345,7 +345,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
 
   __zhistarchive_log_command_end() {
     emulate -L zsh
-    local id="$1" status="$2" async_jobs_json="$3" reason="${4:-precmd}"
+    local id="$1" _status="$2" async_jobs_json="$3" reason="${4:-precmd}"
     __zhistarchive_now
     local qid qsession qts qcwd qreason duration_fields
     __zhistarchive_json_string "$id"; qid="$REPLY"
@@ -356,7 +356,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
     __zhistarchive_duration_json_fields "${__zhistarchive_cmd_start_s[$id]-}" "${__zhistarchive_cmd_start_ns[$id]-}" "$__zhistarchive_now_s" "$__zhistarchive_now_ns"
     duration_fields="$REPLY"
     [[ -z $async_jobs_json ]] && async_jobs_json="[]"
-    __zhistarchive_write "{\"type\":\"command_end\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zhistarchive_now_s,\"epoch_ns\":$__zhistarchive_now_ns,\"status\":$status,\"cwd\":$qcwd,\"async_jobs\":$async_jobs_json,\"reason\":$qreason,$duration_fields}"
+    __zhistarchive_write "{\"type\":\"command_end\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zhistarchive_now_s,\"epoch_ns\":$__zhistarchive_now_ns,\"status\":$_status,\"cwd\":$qcwd,\"async_jobs\":$async_jobs_json,\"reason\":$qreason,$duration_fields}"
     unset "__zhistarchive_cmd_start_s[$id]" "__zhistarchive_cmd_start_ns[$id]"
   }
 
@@ -413,7 +413,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
   __zhistarchive_process_done_jobs() {
     local _save_status=$?
     emulate -L zsh
-    (( __zhistarchive_enabled && __zhistarchive_bg_enabled && ${ZSH_SUBSHELL:-0} -eq 0 )) || return $_save_status
+    (( __zhistarchive_enabled && __zhistarchive_bg_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
 
     local job id js job_state
     for job in "${(@k)__zhistarchive_job_cmd_id}"; do
@@ -437,7 +437,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
   __zhistarchive_preexec() {
     local _save_status=$?
     emulate -L zsh
-    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} -eq 0 )) || return $_save_status
+    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
 
     __zhistarchive_process_done_jobs
     __zhistarchive_now
@@ -467,7 +467,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
   __zhistarchive_precmd() {
     local last_status=$?
     emulate -L zsh
-    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} -eq 0 )) || return $last_status
+    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $last_status
 
     local id="$__zhistarchive_cur_id"
     local -a new_jobs async_jobs
@@ -523,7 +523,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
   __zhistarchive_zshexit() {
     local exit_status=$?
     emulate -L zsh
-    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} -eq 0 )) || return $exit_status
+    (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $exit_status
 
     if [[ -n $__zhistarchive_cur_id ]]; then
       __zhistarchive_log_command_end "$__zhistarchive_cur_id" "$exit_status" "[]" "zshexit"
@@ -548,7 +548,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
   __zhistarchive_trap_chld() {
     local _save_status=$?
     emulate -L zsh
-    (( ${ZSH_SUBSHELL:-0} -eq 0 )) && __zhistarchive_process_done_jobs
+    (( ${ZSH_SUBSHELL:-0} == 0 )) && __zhistarchive_process_done_jobs
     if (( ${+functions[__zhistarchive_user_TRAPCHLD]} )); then
       __zhistarchive_user_TRAPCHLD "$@" || true
     fi
