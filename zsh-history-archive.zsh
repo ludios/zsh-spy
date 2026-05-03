@@ -33,7 +33,7 @@
 # present when this file is sourced, background completion tracking is disabled
 # rather than clobbering that trap. Function-form TRAPCHLD is chained.
 
-if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
+if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   setopt EXTENDED_HISTORY
 
   autoload -Uz add-zsh-hook 2>/dev/null || true
@@ -552,7 +552,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} -eq 0 ]]; then
     if (( ${+functions[__zhistarchive_user_TRAPCHLD]} )); then
       __zhistarchive_user_TRAPCHLD "$@" || true
     fi
-    return 0
+    return $_save_status
   }
 
   # Compute session id and open the per-session file.  The archive requires
