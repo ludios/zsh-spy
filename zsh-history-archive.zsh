@@ -340,7 +340,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zhistarchive_json_string "$typed"; qtyped="$REPLY"
     __zhistarchive_json_string "$expanded"; qexpanded="$REPLY"
     __zhistarchive_json_string "$short"; qshort="$REPLY"
-    __zhistarchive_write "{\"type\":\"command_start\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"seq\":$__zhistarchive_seq,\"ts\":$qts,\"epoch_s\":$__zhistarchive_now_s,\"epoch_ns\":$__zhistarchive_now_ns,\"host\":$qhost,\"user\":$quser,\"cwd\":$qcwd,\"tty\":$qtty,\"shell_pid\":$__zhistarchive_shell_pid,\"histno\":${HISTNO:-0},\"command\":$qtyped,\"command_expanded\":$qexpanded,\"command_short\":$qshort}"
+    __zhistarchive_write "{\"type\":\"command_start\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"seq\":$__zhistarchive_seq,\"ts\":$qts,\"epoch_s\":$__zhistarchive_now_s,\"epoch_ns\":$__zhistarchive_now_ns,\"host\":$qhost,\"user\":$quser,\"cwd\":$qcwd,\"tty\":$qtty,\"shell_pid\":$__zhistarchive_shell_pid,\"histcmd\":${HISTCMD:-0},\"command\":$qtyped,\"command_expanded\":$qexpanded,\"command_short\":$qshort}"
   }
 
   __zhistarchive_log_command_end() {
