@@ -85,6 +85,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   typeset -gA __zhistarchive_job_start_s=()
   typeset -gA __zhistarchive_job_start_ns=()
   typeset -gA __zhistarchive_jobs_before_pids=()
+  typeset -gA __zhistarchive_job_logged_done=()
+  typeset -ga __zhistarchive_cur_adopted=()
 
   if (( ${+sysparams} )) && [[ -n ${sysparams[pid]-} ]]; then
     __zhistarchive_shell_pid="${sysparams[pid]}"
@@ -504,12 +506,64 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zhistarchive_write "{\"type\":\"async_lost\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zhistarchive_now_s,\"epoch_ns\":$__zhistarchive_now_ns,\"job\":$job,\"reason\":$qreason,$duration_fields}"
   }
 
+  # Emit async_end / async_lost records for tracked background jobs, and
+  # adopt completed jobs that precmd can never see.  A job spawned by the
+  # in-flight command line that also finishes before that line does is
+  # reported and deleted by zsh *before* any precmd hook runs: with NOTIFY
+  # unset, preprompt() calls scanjobs() first and precmd hooks after
+  # (Src/utils.c:1567-1576), and scanjobs -> printjob deletes done jobs
+  # (Src/jobs.c:2000-2006, 1362-1373).  The CHLD trap is therefore the only
+  # place such a job is still visible in $jobstates; adopt it here:
+  # attribute it to $__zhistarchive_cur_id, emit async_start, and let the
+  # regular loop below emit its async_end.  Adopted jobs are recorded in
+  # __zhistarchive_job_logged_done (job -> pid csv, so slot reuse is
+  # detected) to keep precmd from logging them a second time, and in
+  # __zhistarchive_cur_adopted so command_end can list them.
+  # No arguments; preserves $? for the surrounding hook/trap machinery.
   __zhistarchive_process_done_jobs() {
     local _save_status=$?
     emulate -L zsh
     (( __zhistarchive_enabled && __zhistarchive_bg_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
 
-    local job id js job_state
+    local job id js job_state cur_pids
+    for job in "${(@k)__zhistarchive_job_logged_done}"; do
+      if (( ! ${+jobstates[$job]} )); then
+        unset "__zhistarchive_job_logged_done[$job]"
+      else
+        __zhistarchive_job_pids_csv "${jobstates[$job]}"
+        if [[ $REPLY != "${__zhistarchive_job_logged_done[$job]}" ]]; then
+          unset "__zhistarchive_job_logged_done[$job]"
+        fi
+      fi
+    done
+
+    if [[ -n $__zhistarchive_cur_id ]]; then
+      for job in "${(@k)jobstates}"; do
+        (( ${+__zhistarchive_job_cmd_id[$job]} )) && continue
+        js="${jobstates[$job]}"
+        [[ ${js%%:*} == done ]] || continue
+        __zhistarchive_job_pids_csv "$js"
+        cur_pids="$REPLY"
+        if [[ -n ${__zhistarchive_jobs_before_pids[$job]+x} && $cur_pids == "${__zhistarchive_jobs_before_pids[$job]}" ]]; then
+          continue
+        fi
+        if [[ -n ${__zhistarchive_job_logged_done[$job]-} && ${__zhistarchive_job_logged_done[$job]} == "$cur_pids" ]]; then
+          continue
+        fi
+        # A done job reached from here is a background job: zsh deletes the
+        # foreground job before running traps queued during the wait
+        # (waitjob: deletejob precedes unqueue_traps, Src/jobs.c:1746-1751),
+        # and dotrap(SIGCHLD) is skipped for job == thisjob
+        # (Src/jobs.c:651-652).
+        __zhistarchive_job_cmd_id[$job]="$__zhistarchive_cur_id"
+        __zhistarchive_job_start_s[$job]="${__zhistarchive_cmd_start_s[$__zhistarchive_cur_id]-}"
+        __zhistarchive_job_start_ns[$job]="${__zhistarchive_cmd_start_ns[$__zhistarchive_cur_id]-}"
+        __zhistarchive_log_async_start "$__zhistarchive_cur_id" "$job" "$js"
+        __zhistarchive_job_logged_done[$job]="$cur_pids"
+        __zhistarchive_cur_adopted+=( "$job" )
+      done
+    fi
+
     for job in "${(@k)__zhistarchive_job_cmd_id}"; do
       id="${__zhistarchive_job_cmd_id[$job]}"
       if (( ! ${+jobstates[$job]} )); then
@@ -546,6 +600,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zhistarchive_cmd_start_ns[$id]="$__zhistarchive_now_ns"
 
     __zhistarchive_jobs_before_pids=()
+    __zhistarchive_cur_adopted=()
     if (( __zhistarchive_bg_enabled )); then
       local j
       for j in "${(@k)jobstates}"; do
@@ -576,15 +631,21 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           __zhistarchive_job_pids_csv "${jobstates[$j]}"
           current_pids="$REPLY"
           before_pids="${__zhistarchive_jobs_before_pids[$j]-}"
+          # Jobs adopted (and fully logged) by the CHLD trap for this
+          # command are recognized by job number + pid csv; do not log
+          # async_start for them a second time.
+          if [[ -n ${__zhistarchive_job_logged_done[$j]-} && ${__zhistarchive_job_logged_done[$j]} == "$current_pids" ]]; then
+            continue
+          fi
           if [[ -z ${__zhistarchive_jobs_before_pids[$j]+x} || $current_pids != $before_pids ]]; then
             new_jobs+=( "$j" )
           fi
         done
       fi
 
+      local -a items
+      items=( "${__zhistarchive_cur_adopted[@]}" )
       if (( ${#new_jobs[@]} )); then
-        local -a items
-        items=()
         for j in "${new_jobs[@]}"; do
           js="${jobstates[$j]}"
           __zhistarchive_job_cmd_id[$j]="$id"
@@ -601,13 +662,12 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
               ;;
           esac
         done
-        async_jobs_json="[${(j:,:)items}]"
-      else
-        async_jobs_json="[]"
       fi
+      async_jobs_json="[${(j:,:)items}]"
 
       __zhistarchive_cur_id=""
       __zhistarchive_log_command_end "$id" "$last_status" "$async_jobs_json" "precmd"
+      __zhistarchive_cur_adopted=()
     fi
 
     __zhistarchive_process_done_jobs
@@ -620,7 +680,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $exit_status
 
     if [[ -n $__zhistarchive_cur_id ]]; then
-      __zhistarchive_log_command_end "$__zhistarchive_cur_id" "$exit_status" "[]" "zshexit"
+      __zhistarchive_log_command_end "$__zhistarchive_cur_id" "$exit_status" "[${(j:,:)__zhistarchive_cur_adopted}]" "zshexit"
       __zhistarchive_cur_id=""
     fi
 
