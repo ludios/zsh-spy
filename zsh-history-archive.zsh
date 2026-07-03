@@ -156,14 +156,25 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     REPLY="\"$REPLY\""
   }
 
+  # Append one record line to the archive fd.
+  #   $1: complete JSONL record, without the trailing newline.
+  # Returns 0 on success; on failure disables the archive and returns 1.
+  # Exactly one writer is used per shell.  syswrite already retries partial
+  # writes and EINTR internally (bin_syswrite, Src/Modules/system.c:261-275),
+  # so a syswrite *failure* (ENOSPC, EIO) can leave a partial prefix on
+  # disk; retrying the whole line with print would append the full record
+  # after that prefix, corrupting the file with a garbled line plus a
+  # duplicate.  Note the print fallback path (no zsh/system) leaves the fd
+  # without close-on-exec, so children inherit it.
   __zhistarchive_raw_write() {
     emulate -L zsh
     local line="$1"
     (( __zhistarchive_enabled && __zhistarchive_fd >= 0 )) || return 1
     if (( __zhistarchive_have_syswrite )); then
       syswrite -o "$__zhistarchive_fd" "${line}"$'\n' 2>/dev/null && return 0
+    else
+      builtin print -r -u "$__zhistarchive_fd" -- "$line" 2>/dev/null && return 0
     fi
-    builtin print -r -u "$__zhistarchive_fd" -- "$line" 2>/dev/null && return 0
     __zhistarchive_enabled=0
     return 1
   }
