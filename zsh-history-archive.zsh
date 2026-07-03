@@ -216,34 +216,117 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     fi
   }
 
+  typeset -gA __zhistarchive_sigmsg_num=()
+
+  # Build the reverse map from zsh's signal-death messages to signal
+  # numbers, resolved against this platform via the $signals special array
+  # (signals[i] names signal number i-1: signals[1]=EXIT, signals[2]=HUP).
+  # The message strings are the sig_msg[] table zsh compiles from
+  # Src/signames2.awk; signals absent from that table print as SIG<NAME>
+  # and are resolved separately in __zhistarchive_status_from_proc_state.
+  # No arguments.  Fills __zhistarchive_sigmsg_num once per shell; entries
+  # map message text -> signal number.
+  __zhistarchive_init_sigmsg_map() {
+    emulate -L zsh
+    (( ${#__zhistarchive_sigmsg_num} == 0 )) || return 0
+    local -A name_msg
+    name_msg=(
+      ABRT   'abort'
+      ALRM   'alarm'
+      BUS    'bus error'
+      CHLD   'death of child'
+      EMT    'EMT instruction'
+      FPE    'floating point exception'
+      FREEZE 'checkpoint freeze'
+      HUP    'hangup'
+      ILL    'illegal hardware instruction'
+      INFO   'status request from keyboard'
+      INT    'interrupt'
+      IO     'i/o ready'
+      IOT    'IOT instruction'
+      KILL   'killed'
+      LOST   'resource lost'
+      PIPE   'broken pipe'
+      POLL   'pollable event occurred'
+      PROF   'profile signal'
+      PWR    'power fail'
+      QUIT   'quit'
+      SEGV   'segmentation fault'
+      SYS    'invalid system call'
+      TERM   'terminated'
+      THAW   'checkpoint thaw'
+      TRAP   'trace trap'
+      URG    'urgent condition'
+      USR1   'user-defined signal 1'
+      USR2   'user-defined signal 2'
+      VTALRM 'virtual time alarm'
+      WINCH  'window size changed'
+      XCPU   'cpu limit exceeded'
+      XFSZ   'file size limit exceeded'
+      XRES   'resource control exceeded'
+    )
+    local name idx
+    for name in "${(@k)name_msg}"; do
+      idx=${signals[(i)$name]}
+      if (( idx <= ${#signals} )); then
+        __zhistarchive_sigmsg_num[${name_msg[$name]}]=$(( idx - 1 ))
+      fi
+    done
+  }
+
+  # Parse one process state from a $jobstates pid=state segment.
+  #   $1: the state text, e.g. "done", "exit 2", "running", "terminated",
+  #       "segmentation fault (core dumped)".
+  # Sets REPLY to the JSON value for the status field (number or null) and
+  # REPLY2 to the status kind:
+  #   exit      normal exit; REPLY is the exit code 0..255.  zsh prints
+  #             WEXITSTATUS here (pmjobstate, Src/Modules/parameter.c:1377),
+  #             never the raw wait status, so no >255 decoding is needed.
+  #   signaled  killed by a signal; REPLY is 128+signum in the shell's own
+  #             $? convention, or null when the signal cannot be identified
+  #             (real-time signals: SIGRTMIN is not knowable from zsh).
+  #   unknown   anything else (running/suspended states, parse failures).
   __zhistarchive_status_from_proc_state() {
     emulate -L zsh
     local state="$1"
-    local raw
+    local raw base idx
     REPLY=null
     REPLY2=unknown
     if [[ $state == done ]]; then
       REPLY=0
       REPLY2=exit
-    elif [[ $state == exit\ * ]]; then
+      return 0
+    fi
+    if [[ $state == exit\ * ]]; then
       raw="${state#exit }"
-      case "$raw" in
-        (*[!0-9]*|'')
-          REPLY=null
-          REPLY2=unknown
-          ;;
-        (*)
-          # zsh 5.10 source's jobstates formatter prints the raw wait status
-          # for nonzero exits. Other versions may print the real exit status.
-          # Treat 256,512,...,65280 as raw wait statuses; otherwise keep as-is.
-          if (( raw > 255 && raw % 256 == 0 )); then
-            REPLY=$(( raw / 256 ))
-          else
-            REPLY=$raw
-          fi
-          REPLY2=exit
-          ;;
-      esac
+      if [[ -n $raw && $raw != *[!0-9]* ]]; then
+        REPLY=$raw
+        REPLY2=exit
+      fi
+      return 0
+    fi
+    if [[ $state == running || $state == suspended* || $state == stopped* ]]; then
+      return 0
+    fi
+    # Everything else pmjobstate can print is sigmsg() output for a signal
+    # death (Src/Modules/parameter.c:1383-1389), optionally suffixed.
+    base="${state%" (core dumped)"}"
+    __zhistarchive_init_sigmsg_map
+    if [[ -n ${__zhistarchive_sigmsg_num[$base]-} ]]; then
+      REPLY=$(( 128 + __zhistarchive_sigmsg_num[$base] ))
+      REPLY2=signaled
+    elif [[ $base == SIG[A-Z0-9]* ]]; then
+      # Signals without a message entry print as SIG<NAME>
+      # (Src/signames2.awk END block).
+      idx=${signals[(i)${base#SIG}]}
+      if (( idx <= ${#signals} )); then
+        REPLY=$(( 128 + idx - 1 ))
+      fi
+      REPLY2=signaled
+    elif [[ $base == real-time\ event\ * || $base == unknown\ signal ]]; then
+      # sigmsg() output for SIGRTMIN..SIGRTMAX and out-of-range numbers
+      # (Src/jobs.c:1116-1127); no portable number is derivable.
+      REPLY2=signaled
     fi
   }
 
