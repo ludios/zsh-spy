@@ -555,6 +555,41 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     return $_save_status
   }
 
+  # Report whether a list-form CHLD trap (set with `trap '...' CHLD`) exists
+  # in the current shell.  zsh's trap builtin has no -p option (bin_trap,
+  # Src/builtin.c), and $(trap) cannot work either: command substitution
+  # enters a subshell without ESUB_KEEPTRAP, which resets every trap that is
+  # not function-form or ZERR/DEBUG (entersubsh, Src/exec.c; "ZERR and DEBUG
+  # traps are kept within subshells, while other traps are reset",
+  # Doc/Zsh/builtins.yo).  Redirecting a builtin does not fork, so list the
+  # traps into a private temp file instead and scan that.
+  #   $1: directory for the temp file; must already exist with mode 0700
+  #       (the archive dir qualifies), since trap bodies may be sensitive.
+  # Returns 0 iff a list-form CHLD trap is present, 1 otherwise or on error
+  # (callers treat errors as "no conflict", matching the old behavior).
+  __zhistarchive_has_list_chld_trap() {
+    emulate -L zsh
+    local dir="$1"
+    local tmpf="${dir}/.traps.$$.${RANDOM}${RANDOM}" line found=0
+    [[ -d $dir ]] || return 1
+    { builtin trap >| "$tmpf" } 2>/dev/null || {
+      command rm -f -- "$tmpf" 2>/dev/null
+      return 1
+    }
+    # The listing prints one line per signal: `trap -- '<body>' CHLD`.
+    # Function-form traps print as function definitions and never match.
+    # Anchoring on both the prefix and the suffix keeps a multi-line trap
+    # body from faking a hit.
+    while IFS= read -r line; do
+      if [[ $line == trap\ --\ *\ CHLD ]]; then
+        found=1
+        break
+      fi
+    done < "$tmpf"
+    command rm -f -- "$tmpf" 2>/dev/null
+    (( found ))
+  }
+
   # Compute session id and open the per-session file.  The archive requires
   # zsh/datetime; normal zsh history timestamping above still works without it.
   if (( __zhistarchive_have_datetime )); then
@@ -589,7 +624,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   if (( __zhistarchive_enabled && __zhistarchive_have_jobparams )) && [[ -o monitor ]]; then
     if (( ${+functions[TRAPCHLD]} )) && [[ ${functions[TRAPCHLD]} != *__zhistarchive_trap_chld* ]]; then
       functions -c TRAPCHLD __zhistarchive_user_TRAPCHLD 2>/dev/null && __zhistarchive_chained_user_chld=1
-    elif [[ -n $(trap -p CHLD 2>/dev/null) ]] && (( ! ${+functions[TRAPCHLD]} )); then
+    elif (( ! ${+functions[TRAPCHLD]} )) && __zhistarchive_has_list_chld_trap "$__zhistarchive_dir"; then
       __zhistarchive_chld_conflict=1
     fi
 
