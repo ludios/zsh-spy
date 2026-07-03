@@ -408,6 +408,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
 
   __zhistarchive_log_session_start() {
     emulate -L zsh
+    local REPLY REPLY2
     __zhistarchive_now
     local qsession qts qhost quser qfile qzver
     __zhistarchive_json_string "$__zhistarchive_session_id"; qsession="$REPLY"
@@ -523,6 +524,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zhistarchive_process_done_jobs() {
     local _save_status=$?
     emulate -L zsh
+    local REPLY REPLY2
     (( __zhistarchive_enabled && __zhistarchive_bg_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
 
     local job id js job_state cur_pids
@@ -585,6 +587,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zhistarchive_preexec() {
     local _save_status=$?
     emulate -L zsh
+    local REPLY REPLY2
     (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
 
     __zhistarchive_process_done_jobs
@@ -616,6 +619,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zhistarchive_precmd() {
     local last_status=$?
     emulate -L zsh
+    local REPLY REPLY2
     (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $last_status
 
     local id="$__zhistarchive_cur_id"
@@ -677,6 +681,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zhistarchive_zshexit() {
     local exit_status=$?
     emulate -L zsh
+    local REPLY REPLY2
     (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $exit_status
 
     if [[ -n $__zhistarchive_cur_id ]]; then
