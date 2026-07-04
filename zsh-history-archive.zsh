@@ -1,8 +1,8 @@
-# This is slop authored by ChatGPT 5.5 Pro on 2026-05-03, using some earlier
+# This was authored by ChatGPT 5.5 Pro on 2026-05-03, using some earlier
 # inputs from ChatGPT 5.2 Thinking.
-# Audited against the zsh master source (5.9.999.3-test) and tested on
-# zsh 5.9; see the git log for per-fix rationale and tests/run.zsh for the
-# pty-driven test suite.
+#
+# It was then fixed up by Claude Fable 5; audited against the zsh master source
+# (5.9.999.3-test) and tested on zsh 5.9.
 
 # zsh JSONL history archive
 # Install: source this near the end of ~/.zshrc.
