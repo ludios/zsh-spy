@@ -37,20 +37,27 @@ zha_check() {
   return $rc
 }
 
-# Block until pty session $1 has produced no output for ~0.4s, i.e. the
-# inner shell is back at its prompt.  Times out after ~8s so a wedged
-# session cannot hang the suite.
+# Block until pty session $1 has produced no output for ~0.6s.  Silence is
+# a heuristic, not proof the command finished: a quiet long-runner (sleep)
+# releases early.  That is safe here because pty input is line-buffered and
+# processed in order -- anything typed "early" is type-ahead the shell only
+# reads after the running command completes -- but it does mean in-session
+# waits must be generous enough for background jobs to finish before the
+# session's `exit` is reached.  (A prompt-marker wait is not an option: zle
+# repaints the prompt while echoing keystrokes, so any marker string shows
+# up in the echo immediately.)  Times out after ~10s so a wedged session
+# cannot hang the suite.
 #   $1: zpty session name.
 zha_settle() {
   local name="$1" chunk
   local -i idle=0
-  repeat 80; do
+  repeat 100; do
     if zpty -rt "$name" chunk 2>/dev/null; then
       idle=0
     else
       (( idle++ ))
     fi
-    (( idle >= 4 )) && break
+    (( idle >= 6 )) && break
     sleep 0.1
   done
 }
@@ -338,7 +345,12 @@ main() {
   test_reply_preserved
   print -r -- "----"
   print -r -- "checks: $ZHA_CHECKS  failures: $ZHA_FAILS"
-  (( ZHA_FAILS == 0 ))
+  if (( ZHA_FAILS != 0 )); then
+    print -r -- "artifacts kept for inspection under: $ZHA_WORK"
+    return 1
+  fi
+  rm -rf -- "$ZHA_WORK"
+  return 0
 }
 
 main "$@"
