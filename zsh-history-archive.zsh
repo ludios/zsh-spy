@@ -59,7 +59,14 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   typeset -gi __zhistarchive_bg_enabled=0
   typeset -gi __zhistarchive_chld_conflict=0
   typeset -gi __zhistarchive_chained_user_chld=0
-  typeset -gi __zhistarchive_notify_was_on=0
+  # Record the user's original NOTIFY preference exactly once per shell:
+  # a re-source runs after the archive itself already did `unsetopt NOTIFY`,
+  # so probing [[ -o notify ]] again would report false regardless of the
+  # user's configuration.
+  if (( ! ${+__zhistarchive_notify_was_on} )); then
+    typeset -gi __zhistarchive_notify_was_on=0
+    [[ -o notify ]] && __zhistarchive_notify_was_on=1
+  fi
   typeset -gi __zhistarchive_fd=-1
   typeset -gi __zhistarchive_seq=0
   typeset -gi __zhistarchive_writing=0
@@ -802,7 +809,6 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
 
     if (( ! __zhistarchive_chld_conflict )); then
       __zhistarchive_bg_enabled=1
-      [[ -o notify ]] && __zhistarchive_notify_was_on=1
       unsetopt NOTIFY
       TRAPCHLD() { __zhistarchive_trap_chld "$@"; }
     fi
