@@ -181,6 +181,17 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     return 1
   }
 
+  # Serialize one record to the archive, preserving lines from reentrant
+  # callers.  Hooks and the CHLD trap can interrupt each other between any
+  # two shell statements, so a busy flag plus a queue is used: reentrant
+  # calls enqueue, the flag owner drains.  After clearing the flag the queue
+  # is checked once more -- a trap firing between the end of the drain loop
+  # and the flag store would otherwise strand its record in the queue until
+  # some later write happened to flush it (possibly not until session_end).
+  # Records may still land out of order relative to wall-clock time when a
+  # trap interleaves; consumers should order by epoch_s/epoch_ns.
+  #   $1: complete JSONL record, without the trailing newline.
+  # Always returns 0; write errors disable the archive in raw_write.
   __zhistarchive_write() {
     emulate -L zsh
     (( __zhistarchive_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
@@ -191,20 +202,22 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       return 0
     fi
 
-    __zhistarchive_writing=1
-    __zhistarchive_raw_write "$line" || true
-
     local -a q
     local queued
-    while (( ${#__zhistarchive_queue[@]} )); do
-      q=( "${__zhistarchive_queue[@]}" )
-      __zhistarchive_queue=()
-      for queued in "${q[@]}"; do
-        __zhistarchive_raw_write "$queued" || true
+    __zhistarchive_writing=1
+    __zhistarchive_raw_write "$line" || true
+    while true; do
+      while (( ${#__zhistarchive_queue[@]} )); do
+        q=( "${__zhistarchive_queue[@]}" )
+        __zhistarchive_queue=()
+        for queued in "${q[@]}"; do
+          __zhistarchive_raw_write "$queued" || true
+        done
       done
+      __zhistarchive_writing=0
+      (( ${#__zhistarchive_queue[@]} )) || break
+      __zhistarchive_writing=1
     done
-
-    __zhistarchive_writing=0
     return 0
   }
 
