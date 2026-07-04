@@ -1,5 +1,8 @@
 # This is slop authored by ChatGPT 5.5 Pro on 2026-05-03, using some earlier
 # inputs from ChatGPT 5.2 Thinking.
+# Audited against the zsh master source (5.9.999.3-test) and tested on
+# zsh 5.9; see the git log for per-fix rationale and tests/run.zsh for the
+# pty-driven test suite.
 
 # zsh JSONL history archive
 # Install: source this near the end of ~/.zshrc.
@@ -11,10 +14,20 @@
 #   session_start
 #   command_start       before zsh executes the entered command line
 #   command_end         after zsh returns from evaluating the entered command line
-#   async_start         after zsh has registered a newly-created background job
+#   async_start         after zsh has registered a newly-created background job;
+#                       jobs that finish before their spawning command line does
+#                       are adopted from the CHLD trap (zsh deletes done jobs
+#                       before precmd hooks can run) and attributed to that
+#                       command's id
 #   async_end           when a tracked background job reaches zsh job-state "done"
 #   async_lost          if a tracked background job disappears from zsh's job table
 #   session_end
+#
+# Status fields: command_end.status is $?.  async_end.status is the exit
+# code of the job's last process (both the raw-wait-status encoding of
+# zsh <= 5.9 and the plain-code encoding of later zsh are normalized), or
+# 128+signum with status_kind "signaled" for signal deaths, or null with
+# status_kind "unknown" when it cannot be determined.
 #
 # Intentional design choices:
 # - JSON Lines, one object per line.
@@ -32,6 +45,16 @@
 # XXX: list-form pre-existing CHLD traps are not safely chainable here. If one is
 # present when this file is sourced, background completion tracking is disabled
 # rather than clobbering that trap. Function-form TRAPCHLD is chained.
+#
+# XXX: the JSON escaping covers the C0 controls, but NUL and bytes that are
+# not valid UTF-8 pass through verbatim (zsh strings are 8-bit clean), so a
+# command line containing such bytes yields a record that strict JSON
+# parsers reject. Recovering consumers should skip unparseable lines.
+#
+# XXX: without zsh/system there is no sysopen, and the plain-redirection
+# fallback cannot set close-on-exec, so every child process inherits the
+# archive fd. Records written by traps may also appear later in the file
+# than records with earlier timestamps; order by epoch_s/epoch_ns.
 
 if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   setopt EXTENDED_HISTORY
