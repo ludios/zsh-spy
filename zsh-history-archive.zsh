@@ -312,9 +312,11 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   #       "segmentation fault (core dumped)".
   # Sets REPLY to the JSON value for the status field (number or null) and
   # REPLY2 to the status kind:
-  #   exit      normal exit; REPLY is the exit code 0..255.  zsh prints
-  #             WEXITSTATUS here (pmjobstate, Src/Modules/parameter.c:1377),
-  #             never the raw wait status, so no >255 decoding is needed.
+  #   exit      normal exit; REPLY is the exit code 0..255.  zsh master
+  #             prints WEXITSTATUS here (pmjobstate,
+  #             Src/Modules/parameter.c:1377); zsh <= 5.9 prints the raw
+  #             wait status, code<<8.  Both encodings are normalized to
+  #             the plain code.
   #   signaled  killed by a signal; REPLY is 128+signum in the shell's own
   #             $? convention, or null when the signal cannot be identified
   #             (real-time signals: SIGRTMIN is not knowable from zsh).
@@ -333,7 +335,17 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     if [[ $state == exit\ * ]]; then
       raw="${state#exit }"
       if [[ -n $raw && $raw != *[!0-9]* ]]; then
-        REPLY=$raw
+        # zsh <= 5.9 prints the raw wait status here (empirically on 5.9:
+        # an exit code of 3 shows as "exit 768"); master fixed pmjobstate
+        # to print WEXITSTATUS (Src/Modules/parameter.c:1377-1380,
+        # zsh-workers/54560).  The encodings cannot collide: WEXITSTATUS
+        # output is 1..255, while a raw wait status for a normal exit is
+        # code<<8, always a positive multiple of 256.
+        if (( raw > 255 && raw % 256 == 0 )); then
+          REPLY=$(( raw / 256 ))
+        else
+          REPLY=$raw
+        fi
         REPLY2=exit
       fi
       return 0
