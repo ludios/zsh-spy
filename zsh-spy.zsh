@@ -12,7 +12,7 @@
 # Install: source this near the end of ~/.zshrc.
 #
 # Records go to one unique JSONL file per interactive zsh session:
-#   ${ZSH_HISTORY_ARCHIVE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh-history-archive}/hist.<session>.jsonl
+#   ${ZSH_SPY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh-spy}/hist.<session>.jsonl
 #
 # Record types:
 #   session_start
@@ -815,7 +815,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     typeset __zhistarchive_safe_host="${__zhistarchive_host//[^A-Za-z0-9_.-]/_}"
     typeset __zhistarchive_safe_user="${__zhistarchive_user//[^A-Za-z0-9_.-]/_}"
     __zhistarchive_session_id="${__zhistarchive_safe_host}.${__zhistarchive_safe_user}.${__zhistarchive_now_s}.${__zhistarchive_now_ns}.${__zhistarchive_shell_pid}.${RANDOM}${RANDOM}"
-    __zhistarchive_dir="${ZSH_HISTORY_ARCHIVE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh-history-archive}"
+    __zhistarchive_dir="${ZSH_SPY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh-spy}"
     __zhistarchive_file="${__zhistarchive_dir}/hist.${__zhistarchive_session_id}.jsonl"
 
     typeset __zhistarchive_old_umask
