@@ -376,6 +376,137 @@ test_session_end_stress() {
   done
 }
 
+# T11: re-sourcing splits the archive into two complete lifecycles instead of
+# silently closing the old descriptor.  Both files must have strict tails, and
+# exactly one must carry each termination reason.
+test_reload_lifecycle() {
+  print -r -- "T11 re-source lifecycle"
+  local file first last
+  local -a files
+  local -i valid=1 reload_count=0 exit_count=0
+  zsh_spy_session t11 SOURCE 'echo before-reload' SOURCE 'echo after-reload'
+  files=( "$ZSH_SPY_WORK/t11"/hist.*.jsonl(N) )
+  (( ${#files[@]} == 2 ))
+  zsh_spy_check $? "t11: re-source produced exactly two lifecycle files"
+  for file in "${files[@]}"; do
+    zsh_spy_json_valid "$file" || valid=0
+    first="$(head -n 1 -- "$file")"
+    last="$(tail -n 1 -- "$file")"
+    [[ $first == *'"type":"session_start"'* ]] || valid=0
+    [[ $last == *'"type":"session_end"'* ]] || valid=0
+    [[ $last == *'"reason":"archive_reloaded"'* ]] && (( ++reload_count ))
+    [[ $last == *'"reason":"zshexit"'* ]] && (( ++exit_count ))
+  done
+  (( valid && reload_count == 1 && exit_count == 1 ))
+  zsh_spy_check $? "t11: both files are complete; reload/zshexit reasons are unique"
+  if (( ${#files[@]} )); then
+    grep -q 'before-reload' "${files[@]}" && grep -q 'after-reload' "${files[@]}"
+    zsh_spy_check $? "t11: commands on both sides of the reload were captured"
+  else
+    zsh_spy_check 1 "t11: commands on both sides of the reload were captured"
+  fi
+}
+
+# T12: the wrapper must present the interrupted status to a chained user trap,
+# return the user's trap status (zero here, meaning CHLD was handled), and
+# survive a re-source without recursion or stale wrapper chaining.
+test_trap_status_across_reload() {
+  print -r -- "T12 TRAPCHLD status across re-source"
+  local actual expected file="$ZSH_SPY_WORK/t12/chld-status"
+  expected=$'user:1\nwrapper:0\nuser:1\nwrapper:0'
+  zsh_spy_session t12 \
+    'TRAPCHLD() { print -r -- "user:$?" >> "$ZSH_SPY_DIR/chld-status" }' \
+    SOURCE \
+    'false; TRAPCHLD; print -r -- "wrapper:$?" >> "$ZSH_SPY_DIR/chld-status"' \
+    SOURCE \
+    'false; TRAPCHLD; print -r -- "wrapper:$?" >> "$ZSH_SPY_DIR/chld-status"'
+  actual="$(cat -- "$file" 2>/dev/null)"
+  [[ $actual == "$expected" ]]
+  zsh_spy_check $? "t12: user sees status 1; wrapper returns handled status 0 twice"
+}
+
+# T13: deleting the installed wrapper is an explicit user replacement.  A
+# later re-source must not resurrect the function that predated the archive.
+test_removed_trap_not_resurrected() {
+  print -r -- "T13 removed TRAPCHLD stays removed"
+  zsh_spy_session t13 \
+    'TRAPCHLD() { print -r -- old >> "$ZSH_SPY_DIR/oldmark" }' \
+    SOURCE \
+    'unfunction TRAPCHLD; : > "$ZSH_SPY_DIR/oldmark"' \
+    SOURCE \
+    'TRAPCHLD'
+  [[ ! -s $ZSH_SPY_WORK/t13/oldmark ]]
+  zsh_spy_check $? "t13: re-source did not resurrect a stale user trap"
+}
+
+# T14: a user trap body may legitimately mention the archive helper name.  Body
+# substring matching must not mistake it for an already-installed wrapper.
+test_trap_body_substring() {
+  print -r -- "T14 TRAPCHLD body substring"
+  zsh_spy_session t14 \
+    'TRAPCHLD() { : __zshspy_trap_chld; print -r -- user >> "$ZSH_SPY_DIR/usermark" }' \
+    SOURCE \
+    'TRAPCHLD'
+  grep -qx user "$ZSH_SPY_WORK/t14/usermark"
+  zsh_spy_check $? "t14: function trap mentioning helper name is still chained"
+}
+
+# T15: force the finalizer down its reentrant queue path.  session_end and the
+# in-flight command_end must be flushed before the descriptor is disabled.
+test_queued_finalizer() {
+  print -r -- "T15 queued finalizer"
+  local file last
+  zsh_spy_session t15 SOURCE \
+    '__zshspy_writing=1; __zshspy_write "{\"type\":\"probe\"}"; exit 7'
+  file="$REPLY"
+  zsh_spy_json_valid "$file"
+  zsh_spy_check $? "t15: forced queued-finalizer output is valid JSONL"
+  grep -qx '{"type":"probe"}' "$file"
+  zsh_spy_check $? "t15: pre-existing queued record was flushed"
+  last="$(tail -n 1 -- "$file")"
+  [[ $last == *'"type":"session_end"'* && $last == *'"status":7'* ]]
+  zsh_spy_check $? "t15: queued session_end is the strict tail with status 7"
+  zsh_spy_first_record "$file" command_end '"reason":"zshexit"'
+  zsh_spy_check $? "t15: in-flight exit command received command_end"
+}
+
+# T16: hook functions in an array are short-circuited by a nonzero predecessor.
+# The logger captures the incoming status but must return success so later user
+# hooks still observe failed commands and nonzero shell exits.
+test_hook_chain_status() {
+  print -r -- "T16 hook-chain status"
+  local file="$ZSH_SPY_WORK/t16/hooks"
+  zsh_spy_session t16 SOURCE \
+    'later_preexec() { print -r -- "preexec:$?" >> "$ZSH_SPY_DIR/hooks" }; later_precmd() { print -r -- "precmd:$?" >> "$ZSH_SPY_DIR/hooks" }; later_zshexit() { print -r -- "zshexit:$?" >> "$ZSH_SPY_DIR/hooks" }; add-zsh-hook preexec later_preexec; add-zsh-hook precmd later_precmd; add-zsh-hook zshexit later_zshexit' \
+    'false' \
+    'exit 7'
+  grep -qx 'precmd:1' "$file"
+  zsh_spy_check $? "t16: later precmd hook observed failed-command status 1"
+  grep -qx 'preexec:1' "$file"
+  zsh_spy_check $? "t16: later preexec hook ran after the failed command"
+  grep -qx 'zshexit:7' "$file"
+  zsh_spy_check $? "t16: later zshexit hook observed exit status 7"
+}
+
+# T17: an active job cannot continue across an archive re-source because its
+# command id belongs to the old session.  Close that lifecycle explicitly with
+# async_lost rather than leaving an unmatched async_start.
+test_reload_with_active_job() {
+  print -r -- "T17 re-source with active job"
+  local file lost=""
+  local -a files
+  zsh_spy_session t17 SOURCE 'sleep 5 &' SOURCE 'kill %1; wait %1 2>/dev/null || true'
+  files=( "$ZSH_SPY_WORK/t17"/hist.*.jsonl(N) )
+  for file in "${files[@]}"; do
+    if zsh_spy_first_record "$file" async_lost '"reason":"archive_reloaded_while_running"'; then
+      lost="$REPLY"
+      break
+    fi
+  done
+  [[ -n $lost ]]
+  zsh_spy_check $? "t17: old lifecycle closes its running job as async_lost"
+}
+
 # Entry point: run every test against a scratch dir and report a summary.
 main() {
   if ! zmodload zsh/zpty 2>/dev/null; then
@@ -397,6 +528,13 @@ main() {
   test_cross_prompt
   test_reply_preserved
   test_session_end_stress
+  test_reload_lifecycle
+  test_trap_status_across_reload
+  test_removed_trap_not_resurrected
+  test_trap_body_substring
+  test_queued_finalizer
+  test_hook_chain_status
+  test_reload_with_active_job
   print -r -- "----"
   print -r -- "checks: $ZSH_SPY_CHECKS  failures: $ZSH_SPY_FAILS"
   if (( ZSH_SPY_FAILS != 0 )); then
