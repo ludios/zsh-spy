@@ -63,6 +63,23 @@ zsh_spy_settle() {
   done
 }
 
+# Wait until pty session $1's child has actually stopped, draining output as
+# it arrives so a chatty command cannot fill the pty buffer.  An empty
+# nonblocking read only means "no output right now"; it says nothing about
+# child liveness.  Times out after ~10s.
+#   $1: zpty session name.
+zsh_spy_wait_exit() {
+  local name="$1" chunk
+  local -i ticks=0
+  while zpty -t "$name" 2>/dev/null; do
+    while zpty -rt "$name" chunk 2>/dev/null; do :; done
+    (( ++ticks >= 200 )) && return 1
+    sleep 0.05
+  done
+  while zpty -rt "$name" chunk 2>/dev/null; do :; done
+  return 0
+}
+
 # Run one scripted interactive session against the archive script.
 #   $1:    session name; the archive dir is $ZSH_SPY_WORK/$1 and the same path
 #          is exported to the inner shell as both ZSH_SPY_DIR
@@ -70,15 +87,19 @@ zsh_spy_settle() {
 #   $2...: command lines typed into the session, in order, each followed by
 #          a settle wait.  The literal line 'SOURCE' types the source
 #          command for the archive script.
-# The session always ends with `exit`.  Sets REPLY to the JSONL file the
-# session produced, or "" if none was created.
+# The harness sends `exit` after the scripted commands unless one of them
+# already stopped the shell.  Sets REPLY to the first JSONL file the session
+# produced, or "" if none was created; re-source tests glob the directory to
+# inspect every lifecycle file.
 zsh_spy_session() {
-  local name="$1" dir="$ZSH_SPY_WORK/$1" cmd chunk
+  local name="$1" dir="$ZSH_SPY_WORK/$1" cmd
+  local -i wait_rc=0
   shift
   mkdir -p -- "$dir"
   zpty -b "$name" env ZSH_SPY_DIR="$dir" ZSH_SPY_DIR="$dir" zsh -f -i
   zsh_spy_settle "$name"
   for cmd in "$@"; do
+    zpty -t "$name" 2>/dev/null || break
     if [[ $cmd == SOURCE ]]; then
       zpty -w "$name" "source ${(q)ZSH_SPY_SRC}"
     else
@@ -86,12 +107,19 @@ zsh_spy_session() {
     fi
     zsh_spy_settle "$name"
   done
-  zpty -w "$name" "exit"
-  while zpty -r "$name" chunk 2>/dev/null; do :; done
+  if zpty -t "$name" 2>/dev/null; then
+    zpty -w "$name" "exit"
+  fi
+  zsh_spy_wait_exit "$name" || wait_rc=$?
   zpty -d "$name" 2>/dev/null
   local -a files
   files=( "$dir"/hist.*.jsonl(N) )
   REPLY="${files[1]-}"
+  if (( wait_rc != 0 )); then
+    print -u2 -r -- "ERROR: timed out waiting for zpty session '$name' to exit"
+    return $wait_rc
+  fi
+  return 0
 }
 
 # Find the first record of a given type in a JSONL file.
@@ -324,6 +352,30 @@ test_reply_preserved() {
   zsh_spy_check $? "t9: REPLY/REPLY2 survive prompt cycles and bg jobs"
 }
 
+# T10: repeat the exact orderly-exit invariant that used to flake.  The
+# harness must wait for the zpty child to stop before deleting the pty; an
+# empty nonblocking read is not evidence that zshexit has run.
+test_session_end_stress() {
+  print -r -- "T10 repeated session_end tail"
+  local file last name
+  local -i i=0 rc=0
+  repeat 8; do
+    (( ++i ))
+    name="t10_$i"
+    zsh_spy_session "$name" SOURCE 'echo tail-probe'
+    file="$REPLY"
+    last=""
+    rc=0
+    [[ -n $file && -s $file ]] || rc=1
+    if (( rc == 0 )); then
+      zsh_spy_json_valid "$file" || rc=1
+      last="$(tail -n 1 -- "$file")"
+      [[ $last == *'"type":"session_end"'* ]] || rc=1
+    fi
+    zsh_spy_check $rc "t10: iteration $i is valid JSONL with session_end last"
+  done
+}
+
 # Entry point: run every test against a scratch dir and report a summary.
 main() {
   if ! zmodload zsh/zpty 2>/dev/null; then
@@ -344,6 +396,7 @@ main() {
   test_exit_status
   test_cross_prompt
   test_reply_preserved
+  test_session_end_stress
   print -r -- "----"
   print -r -- "checks: $ZSH_SPY_CHECKS  failures: $ZSH_SPY_FAILS"
   if (( ZSH_SPY_FAILS != 0 )); then
