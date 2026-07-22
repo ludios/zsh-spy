@@ -64,20 +64,45 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   setopt EXTENDED_HISTORY
 
   autoload -Uz add-zsh-hook 2>/dev/null || true
+  zmodload zsh/parameter 2>/dev/null || true
 
-  # Remove old hooks if this file is re-sourced.
-  add-zsh-hook -d preexec __zshspy_preexec 2>/dev/null || true
-  add-zsh-hook -d precmd  __zshspy_precmd  2>/dev/null || true
-  add-zsh-hook -d zshexit __zshspy_zshexit 2>/dev/null || true
-
-  # Close old fd if this file is re-sourced.
-  if (( ${+__zshspy_fd} && __zshspy_fd >= 0 )); then
-    exec {__zshspy_fd}>&- 2>/dev/null || true
+  # Finish and dismantle the previous archive instance before replacing its
+  # functions.  Older revisions did not have __zshspy_shutdown, so the
+  # fallback at least removes their hooks, closes their fd, and unwraps their
+  # function-form CHLD trap.
+  if (( ${+functions[__zshspy_shutdown]} )); then
+    __zshspy_shutdown "archive_reloaded" 0
+  else
+    add-zsh-hook -d preexec __zshspy_preexec 2>/dev/null || true
+    add-zsh-hook -d precmd  __zshspy_precmd  2>/dev/null || true
+    add-zsh-hook -d zshexit __zshspy_zshexit 2>/dev/null || true
+    if (( ${+__zshspy_fd} && __zshspy_fd >= 0 )); then
+      exec {__zshspy_fd}>&- 2>/dev/null || true
+    fi
+    if (( ${+__zshspy_bg_enabled} && __zshspy_bg_enabled && ${+functions[TRAPCHLD]} )); then
+      typeset __zshspy_old_trap_body="${functions[TRAPCHLD]//[[:space:]]/}"
+      if [[ $__zshspy_old_trap_body == '__zshspy_trap_chld"$@"' ||
+            $__zshspy_old_trap_body == '__zshspy_trap_chld"$@";' ]]; then
+        if (( ${+functions[__zshspy_user_TRAPCHLD]} )); then
+          functions -c __zshspy_user_TRAPCHLD TRAPCHLD 2>/dev/null || true
+        else
+          unfunction TRAPCHLD 2>/dev/null || true
+        fi
+      fi
+      unset __zshspy_old_trap_body
+    fi
+    if (( ${+__zshspy_notify_was_on} && __zshspy_notify_was_on )); then
+      setopt NOTIFY
+    fi
+    unfunction __zshspy_user_TRAPCHLD 2>/dev/null || true
+  fi
+  if (( ${+__zshspy_restore_notify} && __zshspy_restore_notify )); then
+    setopt NOTIFY
+    __zshspy_restore_notify=0
   fi
 
-  zmodload zsh/datetime  2>/dev/null || true
-  zmodload zsh/system    2>/dev/null || true
-  zmodload zsh/parameter 2>/dev/null || true
+  zmodload zsh/datetime 2>/dev/null || true
+  zmodload zsh/system   2>/dev/null || true
 
   typeset -gi __zshspy_enabled=0
   typeset -gi __zshspy_have_syswrite=0
@@ -90,6 +115,9 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   typeset -gi __zshspy_jobs_busy=0
   typeset -gi __zshspy_jobs_pending=0
   typeset -gi __zshspy_jobs_before_valid=0
+  typeset -gi __zshspy_notify_changed=0
+  typeset -gi __zshspy_restore_notify=0
+  typeset -gi __zshspy_trap_owned=0
   # Record the user's original NOTIFY preference exactly once per shell:
   # a re-source runs after the archive itself already did `unsetopt NOTIFY`,
   # so probing [[ -o notify ]] again would report false regardless of the
@@ -116,6 +144,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   typeset -g  __zshspy_now_s=0
   typeset -g  __zshspy_now_ns=0
   typeset -g  __zshspy_now_ts=""
+  typeset -g  __zshspy_trap_body=""
   typeset -ga __zshspy_queue=()
   typeset -gA __zshspy_cmd_start_s=()
   typeset -gA __zshspy_cmd_start_ns=()
@@ -900,40 +929,181 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     return 0
   }
 
+  # Write the terminal record for one archive instance.
+  #   $1: shell/status code.
+  #   $2: termination reason (zshexit or archive_reloaded).
+  __zshspy_log_session_end() {
+    emulate -L zsh
+    local _status="$1" reason="$2"
+    local REPLY REPLY2 qsession qts qreason
+    local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
+    __zshspy_now
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
+    __zshspy_json_string "$reason"; qreason="$REPLY"
+    __zshspy_write "{\"type\":\"session_end\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"reason\":$qreason}"
+  }
+
+  # Complete the current command and every tracked job, then make session_end
+  # the final possible archive write.  CHLD may arrive between any two shell
+  # statements, so finalizing/background_tracking are disabled before the tail
+  # reconciliation and remain disabled before session_end is emitted.
+  #   $1: termination reason (zshexit or archive_reloaded).
+  #   $2: shell/status code.
+  # Returns $2.
+  __zshspy_finalize() {
+    local reason="$1" final_status="$2"
+    emulate -L zsh
+    local REPLY REPLY2
+    local -i final_job_pass=0
+    (( __zshspy_enabled && ! __zshspy_finalizing &&
+       ${ZSH_SUBSHELL:-0} == 0 )) || return $final_status
+
+    # Freeze archive-side CHLD work before the first finalization write.  A
+    # nested zshexit/re-source then sees finalizing=1 and cannot duplicate the
+    # command/job/session tail.  Keep one explicit discovery pass for the
+    # in-flight command, using the preexec snapshot while the wrapper is inert.
+    (( __zshspy_bg_enabled )) && final_job_pass=1
+    __zshspy_finalizing=1
+    __zshspy_bg_enabled=0
+    __zshspy_jobs_pending=0
+    __zshspy_finish_current_command "$final_status" "$reason" "$final_job_pass"
+
+    # No archive CHLD handler can enter from this point.  Keep the semantic lock
+    # closed through session_end so a nested direct reconciliation call also
+    # cannot start work that would outlive the archive lifecycle.
+    __zshspy_jobs_busy=1
+
+    local job id js job_state cur_pids expected_pids lost_reason
+    if [[ $reason == archive_reloaded ]]; then
+      lost_reason="archive_reloaded_while_running"
+    else
+      lost_reason="shell_exit_while_running"
+    fi
+
+    for job in "${(@k)__zshspy_job_cmd_id}"; do
+      id="${__zshspy_job_cmd_id[$job]}"
+      if (( ! ${+jobstates[$job]} )); then
+        __zshspy_log_async_lost "$id" "$job" "missing_from_job_table"
+        __zshspy_forget_job "$job"
+        continue
+      fi
+
+      js="${jobstates[$job]}"
+      __zshspy_job_pids_csv "$js"
+      cur_pids="$REPLY"
+      expected_pids="${__zshspy_job_pids[$job]-}"
+      if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
+        __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
+      else
+        job_state="${js%%:*}"
+        if [[ $job_state == done ]]; then
+          __zshspy_job_logged_done[$job]="$cur_pids"
+          __zshspy_log_async_end "$id" "$job" "$js"
+        else
+          __zshspy_log_async_lost "$id" "$job" "$lost_reason"
+        fi
+      fi
+      __zshspy_forget_job "$job"
+    done
+
+    __zshspy_log_session_end "$final_status" "$reason"
+
+    # A nested finalizer can run while another writer owns the flag (for
+    # example, a chained user CHLD trap may call exit).  In that case the tail
+    # record is queued rather than written directly.  Archive-side CHLD work is
+    # frozen above, so it is now safe to force the complete queue to disk before
+    # disabling the writer and closing the descriptor.
+    __zshspy_drain_queue
+    __zshspy_writing=0
+    __zshspy_enabled=0
+    __zshspy_close_fd
+    return $final_status
+  }
+
+  # Restore hook/trap/option state owned by this archive instance.  The CHLD
+  # wrapper is only replaced when its body still exactly matches the body this
+  # instance installed, so a user who deliberately replaced TRAPCHLD after
+  # sourcing is never clobbered.
+  # No arguments.  Returns 0.
+  __zshspy_teardown() {
+    emulate -L zsh
+    add-zsh-hook -d preexec __zshspy_preexec 2>/dev/null || true
+    add-zsh-hook -d precmd  __zshspy_precmd  2>/dev/null || true
+    add-zsh-hook -d zshexit __zshspy_zshexit 2>/dev/null || true
+
+    # `emulate -L` enables LOCAL_TRAPS; turn that off before changing the
+    # TRAPCHLD function so the restoration survives this function's return.
+    unsetopt LOCAL_TRAPS
+    if (( __zshspy_trap_owned && ${+functions[TRAPCHLD]} )) &&
+       [[ ${functions[TRAPCHLD]} == "$__zshspy_trap_body" ]]; then
+      if (( __zshspy_chained_user_chld && ${+functions[__zshspy_user_TRAPCHLD]} )); then
+        functions -c __zshspy_user_TRAPCHLD TRAPCHLD 2>/dev/null || true
+      else
+        unfunction TRAPCHLD 2>/dev/null || true
+      fi
+    fi
+    __zshspy_trap_owned=0
+    __zshspy_trap_body=""
+    unfunction __zshspy_user_TRAPCHLD 2>/dev/null || true
+
+    if (( __zshspy_notify_changed )); then
+      # LOCAL_OPTIONS would undo a direct setopt on return.  Re-source calls
+      # shutdown from top level, which applies this deferred restoration after
+      # the function has returned.
+      __zshspy_restore_notify=1
+      __zshspy_notify_changed=0
+    fi
+    __zshspy_close_fd
+    return 0
+  }
+
+  # Finalize and remove a live archive instance.  This is used by re-sourcing;
+  # normal shell exit calls finalize directly because the process is ending.
+  #   $1: termination reason.
+  #   $2: status code.
+  # Returns $2.
+  __zshspy_shutdown() {
+    local reason="${1:-archive_reloaded}" final_status="${2:-0}"
+    emulate -L zsh
+    if (( __zshspy_enabled )); then
+      __zshspy_finalize "$reason" "$final_status"
+    else
+      __zshspy_close_fd
+    fi
+    __zshspy_teardown
+    return $final_status
+  }
+
   __zshspy_zshexit() {
     local exit_status=$?
     emulate -L zsh
     local REPLY REPLY2
-    (( __zshspy_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return $exit_status
+    __zshspy_finalize "zshexit" "$exit_status"
+    return 0
+  }
 
-    if [[ -n $__zshspy_cur_id ]]; then
-      __zshspy_log_command_end "$__zshspy_cur_id" "$exit_status" "[${(j:,:)__zshspy_cur_adopted}]" "zshexit"
-      __zshspy_cur_id=""
-    fi
-
-    __zshspy_process_done_jobs
-
-    __zshspy_now
-    local qsession qts
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_write "{\"type\":\"session_end\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$exit_status}"
-
-    if (( __zshspy_fd >= 0 )); then
-      exec {__zshspy_fd}>&- 2>/dev/null || true
-      __zshspy_fd=-1
-    fi
-    return $exit_status
+  # Set $? for the immediately following user trap call.
+  #   $1: status to restore.
+  # Returns $1.
+  __zshspy_restore_status() {
+    return "$1"
   }
 
   __zshspy_trap_chld() {
     local _save_status=$?
     emulate -L zsh
-    (( ${ZSH_SUBSHELL:-0} == 0 )) && __zshspy_process_done_jobs
-    if (( ${+functions[__zshspy_user_TRAPCHLD]} )); then
-      __zshspy_user_TRAPCHLD "$@" || true
+    local -i trap_status=0
+    (( ${ZSH_SUBSHELL:-0} == 0 && ! __zshspy_finalizing )) && __zshspy_process_done_jobs
+    if (( __zshspy_chained_user_chld && ${+functions[__zshspy_user_TRAPCHLD]} )); then
+      __zshspy_restore_status "$_save_status"
+      __zshspy_user_TRAPCHLD "$@"
+      trap_status=$?
     fi
-    return $_save_status
+    # A nonzero function-trap return tells zsh the signal was not handled and
+    # interrupts the surrounding execution.  Preserve the chained trap's own
+    # signal semantics; when there was no user trap, this wrapper handled CHLD.
+    return $trap_status
   }
 
   # Report whether a list-form CHLD trap (set with `trap '...' CHLD`) exists
@@ -943,20 +1113,36 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   # not function-form or ZERR/DEBUG (entersubsh, Src/exec.c; "ZERR and DEBUG
   # traps are kept within subshells, while other traps are reset",
   # Doc/Zsh/builtins.yo).  Redirecting a builtin does not fork, so list the
-  # traps into a private temp file instead and scan that.
-  #   $1: directory for the temp file; must already exist with mode 0700
-  #       (the archive dir qualifies), since trap bodies may be sensitive.
-  # Returns 0 iff a list-form CHLD trap is present, 1 otherwise or on error
-  # (callers treat errors as "no conflict", matching the old behavior).
+  # traps into an exclusively-created private temp file and scan that.
+  #   $1: existing directory for the temp file.
+  # Returns 0 if a list-form CHLD trap is present, 1 if absent, and 2 if the
+  # trap table could not be inspected.  Callers treat 2 as a conflict: an
+  # unknown result must never authorize replacing a user's trap.
   __zshspy_has_list_chld_trap() {
     emulate -L zsh
     local dir="$1"
-    local tmpf="${dir}/.traps.$$.${RANDOM}${RANDOM}" line found=0
-    [[ -d $dir ]] || return 1
-    { builtin trap >| "$tmpf" } 2>/dev/null || {
+    local tmpf="${dir}/.traps.$$.${RANDOM}${RANDOM}" line
+    local -i found=0 tmpfd=-1 trap_rc=0
+    [[ -d $dir ]] || return 2
+
+    if (( ${+builtins} && ${+builtins[sysopen]} )); then
+      sysopen -w -m 0600 -o create,cloexec,excl -u tmpfd "$tmpf" 2>/dev/null || return 2
+      builtin trap 1>&$tmpfd 2>/dev/null || trap_rc=$?
+      exec {tmpfd}>&- 2>/dev/null || true
+    else
+      local old_umask
+      old_umask="$(umask)"
+      umask 077
+      unsetopt CLOBBER
+      unsetopt CLOBBER_EMPTY 2>/dev/null || true
+      { builtin trap > "$tmpf" } 2>/dev/null || trap_rc=$?
+      umask "$old_umask"
+    fi
+    if (( trap_rc != 0 )); then
       command rm -f -- "$tmpf" 2>/dev/null
-      return 1
-    }
+      return 2
+    fi
+
     # The listing prints one line per signal: `trap -- '<body>' CHLD`.
     # Function-form traps print as function definitions and never match.
     # Anchoring on both the prefix and the suffix keeps a multi-line trap
@@ -966,7 +1152,10 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
         found=1
         break
       fi
-    done < "$tmpf"
+    done < "$tmpf" || {
+      command rm -f -- "$tmpf" 2>/dev/null
+      return 2
+    }
     command rm -f -- "$tmpf" 2>/dev/null
     (( found ))
   }
@@ -999,16 +1188,30 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   # Enable background tracking only if we have zsh job parameters and no
   # unchainable pre-existing list-form CHLD trap.
   if (( __zshspy_enabled && __zshspy_have_jobparams )) && [[ -o monitor ]]; then
-    if (( ${+functions[TRAPCHLD]} )) && [[ ${functions[TRAPCHLD]} != *__zshspy_trap_chld* ]]; then
-      functions -c TRAPCHLD __zshspy_user_TRAPCHLD 2>/dev/null && __zshspy_chained_user_chld=1
-    elif (( ! ${+functions[TRAPCHLD]} )) && __zshspy_has_list_chld_trap "$__zshspy_dir"; then
-      __zshspy_chld_conflict=1
+    unfunction __zshspy_user_TRAPCHLD 2>/dev/null || true
+    if (( ${+functions[TRAPCHLD]} )); then
+      if functions -c TRAPCHLD __zshspy_user_TRAPCHLD 2>/dev/null; then
+        __zshspy_chained_user_chld=1
+      else
+        # Never replace a trap we failed to preserve.
+        __zshspy_chld_conflict=1
+      fi
+    else
+      __zshspy_has_list_chld_trap "$__zshspy_dir"
+      case $? in
+        (0|2) __zshspy_chld_conflict=1 ;;
+      esac
     fi
 
     if (( ! __zshspy_chld_conflict )); then
       __zshspy_bg_enabled=1
+      if [[ -o notify ]]; then
+        __zshspy_notify_changed=1
+      fi
       unsetopt NOTIFY
       TRAPCHLD() { __zshspy_trap_chld "$@"; }
+      __zshspy_trap_owned=1
+      __zshspy_trap_body="${functions[TRAPCHLD]}"
     fi
   fi
 
