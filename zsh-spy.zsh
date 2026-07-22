@@ -1,3 +1,7 @@
+#!/usr/bin/env zsh
+
+# Note: to start logging, this file must be sourced, not executed.
+
 # This was authored by ChatGPT 5.5 Pro on 2026-05-03, using some earlier
 # inputs from ChatGPT 5.2 Thinking.
 #
