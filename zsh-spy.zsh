@@ -131,19 +131,19 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     if (( ${+epochtime} )); then
       local -a _t
       _t=( "${epochtime[@]}" )
-      typeset -g __zshspy_now_s="${_t[1]}"
-      typeset -g __zshspy_now_ns="${_t[2]}"
+      __zshspy_now_s="${_t[1]}"
+      __zshspy_now_ns="${_t[2]}"
     else
-      typeset -g __zshspy_now_s=0
-      typeset -g __zshspy_now_ns=0
-      typeset -g __zshspy_now_ts=""
+      __zshspy_now_s=0
+      __zshspy_now_ns=0
+      __zshspy_now_ts=""
       return 1
     fi
     if (( ${+builtins} && ${+builtins[strftime]} )); then
       strftime -s __zshspy_now_ts '%Y-%m-%dT%H:%M:%S%z' "$__zshspy_now_s" "$__zshspy_now_ns" 2>/dev/null || \
-        typeset -g __zshspy_now_ts="$__zshspy_now_s"
+        __zshspy_now_ts="$__zshspy_now_s"
     else
-      typeset -g __zshspy_now_ts="$__zshspy_now_s"
+      __zshspy_now_ts="$__zshspy_now_s"
     fi
   }
 
@@ -192,6 +192,44 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     REPLY="\"$REPLY\""
   }
 
+  # Close the archive descriptor exactly once.
+  # No arguments.  Returns 0 even when no descriptor is open.
+  __zshspy_close_fd() {
+    emulate -L zsh
+    if (( __zshspy_fd >= 0 )); then
+      exec {__zshspy_fd}>&- 2>/dev/null || true
+      __zshspy_fd=-1
+    fi
+    return 0
+  }
+
+  # Open a brand-new archive path without following or appending to an
+  # existing entry.  Session names are designed to be unique; a collision is
+  # therefore safer to reject than to merge two lifecycles or follow a
+  # pre-created symlink.  The shell-redirection fallback cannot set close-on-
+  # exec, but NO_CLOBBER still gives it exclusive-create semantics.
+  #   $1: archive path to create.
+  # Returns 0 with __zshspy_fd open, 1 on failure.
+  __zshspy_open_file() {
+    emulate -L zsh
+    local file="$1"
+    __zshspy_fd=-1
+    if (( ${+builtins} && ${+builtins[sysopen]} )); then
+      sysopen -w -m 0600 -o create,cloexec,excl -u __zshspy_fd "$file" 2>/dev/null || {
+        __zshspy_fd=-1
+        return 1
+      }
+    else
+      unsetopt CLOBBER
+      unsetopt CLOBBER_EMPTY 2>/dev/null || true
+      exec {__zshspy_fd}>"$file" 2>/dev/null || {
+        __zshspy_fd=-1
+        return 1
+      }
+    fi
+    return 0
+  }
+
   # Append one record line to the archive fd.
   #   $1: complete JSONL record, without the trailing newline.
   # Returns 0 on success; on failure disables the archive and returns 1.
@@ -212,7 +250,24 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       builtin print -r -u "$__zshspy_fd" -- "$line" 2>/dev/null && return 0
     fi
     __zshspy_enabled=0
+    __zshspy_close_fd
     return 1
+  }
+
+  # Drain every currently queued record in FIFO order.  Remove one element at
+  # a time instead of copying and then clearing the whole array: a CHLD trap may
+  # append between any two shell statements, and a whole-array clear could erase
+  # the newly appended record.
+  # No arguments.  Returns 0; write errors disable the archive in raw_write.
+  __zshspy_drain_queue() {
+    emulate -L zsh
+    local queued
+    while (( ${#__zshspy_queue[@]} )); do
+      queued="${__zshspy_queue[1]}"
+      shift __zshspy_queue
+      __zshspy_raw_write "$queued" || true
+    done
+    return 0
   }
 
   # Serialize one record to the archive, preserving lines from reentrant
@@ -236,18 +291,10 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       return 0
     fi
 
-    local -a q
-    local queued
     __zshspy_writing=1
     __zshspy_raw_write "$line" || true
     while true; do
-      while (( ${#__zshspy_queue[@]} )); do
-        q=( "${__zshspy_queue[@]}" )
-        __zshspy_queue=()
-        for queued in "${q[@]}"; do
-          __zshspy_raw_write "$queued" || true
-        done
-      done
+      __zshspy_drain_queue
       __zshspy_writing=0
       (( ${#__zshspy_queue[@]} )) || break
       __zshspy_writing=1
@@ -468,6 +515,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_log_session_start() {
     emulate -L zsh
     local REPLY REPLY2
+    local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qsession qts qhost quser qfile qzver
     __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
@@ -502,6 +550,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_log_command_end() {
     emulate -L zsh
     local id="$1" _status="$2" async_jobs_json="$3" reason="${4:-precmd}"
+    local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts qcwd qreason duration_fields
     __zshspy_json_string "$id"; qid="$REPLY"
@@ -519,6 +568,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_log_async_start() {
     emulate -L zsh
     local id="$1" job="$2" js="$3"
+    local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts job_fields
     __zshspy_json_string "$id"; qid="$REPLY"
@@ -531,6 +581,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_log_async_end() {
     emulate -L zsh
     local id="$1" job="$2" js="$3"
+    local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts job_fields duration_fields last_state status_json status_kind
     local -a parts
@@ -555,6 +606,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_log_async_lost() {
     emulate -L zsh
     local id="$1" job="$2" reason="$3"
+    local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts qreason duration_fields
     __zshspy_json_string "$id"; qid="$REPLY"
@@ -824,11 +876,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     [[ -d $__zshspy_dir ]] || command mkdir -p -- "$__zshspy_dir" 2>/dev/null || true
 
     if [[ -d $__zshspy_dir ]]; then
-      if (( ${+builtins} && ${+builtins[sysopen]} )); then
-        sysopen -w -a -m 0600 -o create,cloexec -u __zshspy_fd "$__zshspy_file" 2>/dev/null || __zshspy_fd=-1
-      else
-        exec {__zshspy_fd}>>"$__zshspy_file" 2>/dev/null || __zshspy_fd=-1
-      fi
+      __zshspy_open_file "$__zshspy_file" || __zshspy_fd=-1
     fi
     umask "$__zshspy_old_umask"
 
