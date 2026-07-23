@@ -81,9 +81,9 @@ zsh_spy_wait_exit() {
 }
 
 # Run one scripted interactive session against the archive script.
-#   $1:    session name; the archive dir is $ZSH_SPY_WORK/$1 and the same path
-#          is exported to the inner shell as both ZSH_SPY_DIR
-#          and ZSH_SPY_DIR (handy for probes that write files).
+#   $1:    session name; the archive dir is $ZSH_SPY_WORK/$1 and is exported
+#          to the inner shell as ZSH_SPY_DIR (handy for probes that write
+#          files).
 #   $2...: command lines typed into the session, in order, each followed by
 #          a settle wait.  The literal line 'SOURCE' types the source
 #          command for the archive script.
@@ -96,7 +96,7 @@ zsh_spy_session() {
   local -i wait_rc=0
   shift
   mkdir -p -- "$dir"
-  zpty -b "$name" env ZSH_SPY_DIR="$dir" ZSH_SPY_DIR="$dir" zsh -f -i
+  zpty -b "$name" env ZSH_SPY_DIR="$dir" zsh -f -i
   zsh_spy_settle "$name"
   for cmd in "$@"; do
     zpty -t "$name" 2>/dev/null || break
