@@ -305,8 +305,9 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   }
 
   # Serialize one record to the archive, preserving lines from reentrant
-  # callers.  Hooks and the CHLD trap can interrupt each other between any
-  # two shell statements, so a busy flag plus a queue is used: reentrant
+  # callers.  The CHLD trap can interrupt a hook between any two shell
+  # statements (though never another CHLD trap), so a busy flag plus a
+  # queue is used: reentrant
   # calls enqueue, the flag owner drains.  After clearing the flag the queue
   # is checked once more -- a trap firing between the end of the drain loop
   # and the flag store would otherwise strand its record in the queue until
@@ -664,10 +665,12 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           "__zshspy_job_pids[$job]"
   }
 
-  # Serialize semantic job-table reconciliation.  The line writer already
-  # protects JSONL bytes, but without this separate lock a second CHLD trap can
-  # observe the same map entry while the first trap is halfway through logging
-  # it and emit a duplicate lifecycle.
+  # Serialize semantic job-table reconciliation.  A CHLD trap can never
+  # interrupt another CHLD trap (zsh marks the signal ignored while its own
+  # trap runs), but it can fire between any two statements of a hook that is
+  # halfway through reading or updating the job maps; without this separate
+  # lock that trap could observe the same map entry and emit a duplicate
+  # lifecycle.  The line writer only protects JSONL bytes, not map semantics.
   # Returns 0 to the lock owner, 1 to a reentrant caller (and marks work pending).
   __zshspy_jobs_lock() {
     emulate -L zsh
