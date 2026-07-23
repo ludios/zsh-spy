@@ -1,12 +1,9 @@
 #!/usr/bin/env zsh
 
-# Note: to start logging, this file must be sourced, not executed.
-
-# This was authored by ChatGPT 5.5 Pro on 2026-05-03, using some earlier
-# inputs from ChatGPT 5.2 Thinking.
-#
-# It was then fixed up by Claude Fable 5; audited against the zsh master source
-# (5.9.999.3-test) and tested on zsh 5.9.
+# Model-output: ChatGPT 5.2 Thinking
+# Model-output: ChatGPT 5.5 Pro
+# Model-output: ChatGPT 5.6 Sol (Pro)
+# Model-output: Claude Fable 5
 
 # zsh JSONL history archive
 # Install: source this near the end of ~/.zshrc.
