@@ -67,34 +67,9 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   zmodload zsh/parameter 2>/dev/null || true
 
   # Finish and dismantle the previous archive instance before replacing its
-  # functions.  Older revisions did not have __zshspy_shutdown, so the
-  # fallback at least removes their hooks, closes their fd, and unwraps their
-  # function-form CHLD trap.
+  # functions.
   if (( ${+functions[__zshspy_shutdown]} )); then
     __zshspy_shutdown "archive_reloaded" 0
-  else
-    add-zsh-hook -d preexec __zshspy_preexec 2>/dev/null || true
-    add-zsh-hook -d precmd  __zshspy_precmd  2>/dev/null || true
-    add-zsh-hook -d zshexit __zshspy_zshexit 2>/dev/null || true
-    if (( ${+__zshspy_fd} && __zshspy_fd >= 0 )); then
-      exec {__zshspy_fd}>&- 2>/dev/null || true
-    fi
-    if (( ${+__zshspy_bg_enabled} && __zshspy_bg_enabled && ${+functions[TRAPCHLD]} )); then
-      typeset __zshspy_old_trap_body="${functions[TRAPCHLD]//[[:space:]]/}"
-      if [[ $__zshspy_old_trap_body == '__zshspy_trap_chld"$@"' ||
-            $__zshspy_old_trap_body == '__zshspy_trap_chld"$@";' ]]; then
-        if (( ${+functions[__zshspy_user_TRAPCHLD]} )); then
-          functions -c __zshspy_user_TRAPCHLD TRAPCHLD 2>/dev/null || true
-        else
-          unfunction TRAPCHLD 2>/dev/null || true
-        fi
-      fi
-      unset __zshspy_old_trap_body
-    fi
-    if (( ${+__zshspy_notify_was_on} && __zshspy_notify_was_on )); then
-      setopt NOTIFY
-    fi
-    unfunction __zshspy_user_TRAPCHLD 2>/dev/null || true
   fi
   if (( ${+__zshspy_restore_notify} && __zshspy_restore_notify )); then
     setopt NOTIFY
