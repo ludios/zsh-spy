@@ -21,6 +21,10 @@ typeset -g  ZSH_SPY_SRC="$ZSH_SPY_ROOT/zsh-spy.zsh"
 typeset -g  ZSH_SPY_WORK=""
 typeset -gi ZSH_SPY_CHECKS=0
 typeset -gi ZSH_SPY_FAILS=0
+# Everything the current pty session has printed (prompts, command echo,
+# command output).  Reset per session; lets tests assert on terminal output,
+# e.g. that stderr still reaches the terminal at all.
+typeset -g  ZSH_SPY_SESSION_OUT=""
 
 # Record one check result, our assert primitive.
 #   $1: 0 for pass, nonzero for fail (typically the $? of a test predicate).
@@ -54,6 +58,7 @@ zsh_spy_settle() {
   local -i idle=0
   repeat 100; do
     if zpty -rt "$name" chunk 2>/dev/null; then
+      ZSH_SPY_SESSION_OUT+="$chunk"
       idle=0
     else
       (( idle++ ))
@@ -72,11 +77,11 @@ zsh_spy_wait_exit() {
   local name="$1" chunk
   local -i ticks=0
   while zpty -t "$name" 2>/dev/null; do
-    while zpty -rt "$name" chunk 2>/dev/null; do :; done
+    while zpty -rt "$name" chunk 2>/dev/null; do ZSH_SPY_SESSION_OUT+="$chunk"; done
     (( ++ticks >= 200 )) && return 1
     sleep 0.05
   done
-  while zpty -rt "$name" chunk 2>/dev/null; do :; done
+  while zpty -rt "$name" chunk 2>/dev/null; do ZSH_SPY_SESSION_OUT+="$chunk"; done
   return 0
 }
 
@@ -95,6 +100,7 @@ zsh_spy_session() {
   local name="$1" dir="$ZSH_SPY_WORK/$1" cmd
   local -i wait_rc=0
   shift
+  ZSH_SPY_SESSION_OUT=""
   mkdir -p -- "$dir"
   zpty -b "$name" env ZSH_SPY_DIR="$dir" zsh -f -i
   zsh_spy_settle "$name"
@@ -510,6 +516,27 @@ test_reload_with_active_job() {
   zsh_spy_check $? "t17: old lifecycle closes its running job as async_lost"
 }
 
+# T18: the session's stderr must keep flowing to the terminal.  Redirections
+# attached to exec are permanent, so a stray 2>/dev/null on the fd-close and
+# fd-open execs in the source/reload paths used to point the shell's fd 2 --
+# and every child's -- at /dev/null for the rest of the session.  The markers
+# are computed at runtime so the pty's echo of the typed command line cannot
+# satisfy the checks.
+test_stderr_visible() {
+  print -r -- "T18 stderr visibility"
+  zsh_spy_session t18 SOURCE \
+    'print -u2 STDERR-$((1000+1))' \
+    'command ls /nonexistent-zzz-$((2000+2))' \
+    SOURCE \
+    'print -u2 STDERR-$((3000+3))'
+  [[ $ZSH_SPY_SESSION_OUT == *STDERR-1001* ]]
+  zsh_spy_check $? "t18: shell builtin stderr reaches the terminal after source"
+  [[ $ZSH_SPY_SESSION_OUT == *"No such file"* ]]
+  zsh_spy_check $? "t18: child process stderr reaches the terminal"
+  [[ $ZSH_SPY_SESSION_OUT == *STDERR-3003* ]]
+  zsh_spy_check $? "t18: stderr still reaches the terminal after a re-source"
+}
+
 # Entry point: run every test against a scratch dir and report a summary.
 main() {
   if ! zmodload zsh/zpty 2>/dev/null; then
@@ -538,6 +565,7 @@ main() {
   test_queued_finalizer
   test_hook_chain_status
   test_reload_with_active_job
+  test_stderr_visible
   print -r -- "----"
   print -r -- "checks: $ZSH_SPY_CHECKS  failures: $ZSH_SPY_FAILS"
   if (( ZSH_SPY_FAILS != 0 )); then
