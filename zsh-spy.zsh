@@ -206,7 +206,9 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_close_fd() {
     emulate -L zsh
     if (( __zshspy_fd >= 0 )); then
-      exec {__zshspy_fd}>&- 2>/dev/null || true
+      # Redirections attached to exec are permanent: a bare 2>/dev/null here
+      # would leave the shell's stderr on /dev/null.  Scope it to the block.
+      { exec {__zshspy_fd}>&- } 2>/dev/null || true
       __zshspy_fd=-1
     fi
     return 0
@@ -231,7 +233,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     else
       unsetopt CLOBBER
       unsetopt CLOBBER_EMPTY 2>/dev/null || true
-      exec {__zshspy_fd}>"$file" 2>/dev/null || {
+      # exec redirections are permanent; the block keeps 2>/dev/null temporary.
+      { exec {__zshspy_fd}>"$file" } 2>/dev/null || {
         __zshspy_fd=-1
         return 1
       }
@@ -1106,7 +1109,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     if (( ${+builtins} && ${+builtins[sysopen]} )); then
       sysopen -w -m 0600 -o create,cloexec,excl -u tmpfd "$tmpf" 2>/dev/null || return 2
       builtin trap 1>&$tmpfd 2>/dev/null || trap_rc=$?
-      exec {tmpfd}>&- 2>/dev/null || true
+      # exec redirections are permanent; the block keeps 2>/dev/null temporary.
+      { exec {tmpfd}>&- } 2>/dev/null || true
     else
       local old_umask
       old_umask="$(umask)"
