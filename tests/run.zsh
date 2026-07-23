@@ -470,9 +470,12 @@ test_queued_finalizer() {
   zsh_spy_check $? "t15: in-flight exit command received command_end"
 }
 
-# T16: hook functions in an array are short-circuited by a nonzero predecessor.
-# The logger captures the incoming status but must return success so later user
-# hooks still observe failed commands and nonzero shell exits.
+# T16: hook coexistence.  zsh runs every function in a hook array even when an
+# earlier one returns nonzero, and restores $? between the calls (verified
+# empirically on zsh 5.9.1), so a hook's return value can neither stop later
+# hooks nor change the status they observe.  Assert that user-visible contract
+# anyway: with the archive's hooks installed first, later user hooks must still
+# run and still see the failed command's status and the nonzero shell exit.
 test_hook_chain_status() {
   print -r -- "T16 hook-chain status"
   local file="$ZSH_SPY_WORK/t16/hooks"
