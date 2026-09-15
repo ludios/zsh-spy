@@ -5,6 +5,7 @@
 # Model-output: ChatGPT 5.6 Sol (Pro)
 # Model-output: Claude Fable 5
 # Model-output: Claude Fable 5.1
+# Model-output: Claude Opus 4.8
 
 # zsh JSONL history archive
 # Install: source this near the end of ~/.zshrc.
@@ -154,43 +155,37 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     fi
   }
 
+  # Map each character JSON must escape to its escape sequence, built once:
+  # the two-character short forms, then \uXXXX for every other C0 control
+  # (NUL included).  DEL and bytes >= 0x80 are legal unescaped in JSON and
+  # pass through.
+  typeset -gA __zshspy_json_esc
+  __zshspy_json_esc=(
+    $'\\' '\\'   $'"' '\"'
+    $'\b' '\b'   $'\t' '\t'   $'\n' '\n'   $'\f' '\f'   $'\r' '\r'
+  )
+  () {
+    local -i i
+    local c
+    for i in {0..31}; do
+      c="${(#)i}"
+      (( ${+__zshspy_json_esc[$c]} )) || \
+        __zshspy_json_esc[$c]="\\u00${(l:2::0:)${(L)$(([##16]i))}}"
+    done
+  }
+
+  # Escape a string for inclusion inside a JSON double-quoted value.  One
+  # global-substitution pass rewrites every character that must be escaped,
+  # so a reentrant caller cannot observe a half-escaped result.  As the
+  # header notes, bytes that are not valid UTF-8 still pass through verbatim.
+  #   $1: raw string.
+  # Sets __zshspy_r to the escaped string (without the surrounding quotes).
   __zshspy_json_escape() {
     emulate -L zsh
+    setopt extendedglob
     local s="$1"
-    s="${s//\\/\\\\}"
-    s="${s//\"/\\\"}"
-    s="${s//$'\001'/\\u0001}"
-    s="${s//$'\002'/\\u0002}"
-    s="${s//$'\003'/\\u0003}"
-    s="${s//$'\004'/\\u0004}"
-    s="${s//$'\005'/\\u0005}"
-    s="${s//$'\006'/\\u0006}"
-    s="${s//$'\007'/\\u0007}"
-    s="${s//$'\010'/\\b}"
-    s="${s//$'\011'/\\t}"
-    s="${s//$'\012'/\\n}"
-    s="${s//$'\013'/\\u000b}"
-    s="${s//$'\014'/\\f}"
-    s="${s//$'\015'/\\r}"
-    s="${s//$'\016'/\\u000e}"
-    s="${s//$'\017'/\\u000f}"
-    s="${s//$'\020'/\\u0010}"
-    s="${s//$'\021'/\\u0011}"
-    s="${s//$'\022'/\\u0012}"
-    s="${s//$'\023'/\\u0013}"
-    s="${s//$'\024'/\\u0014}"
-    s="${s//$'\025'/\\u0015}"
-    s="${s//$'\026'/\\u0016}"
-    s="${s//$'\027'/\\u0017}"
-    s="${s//$'\030'/\\u0018}"
-    s="${s//$'\031'/\\u0019}"
-    s="${s//$'\032'/\\u001a}"
-    s="${s//$'\033'/\\u001b}"
-    s="${s//$'\034'/\\u001c}"
-    s="${s//$'\035'/\\u001d}"
-    s="${s//$'\036'/\\u001e}"
-    s="${s//$'\037'/\\u001f}"
-    __zshspy_r="$s"
+    local MATCH MBEGIN MEND
+    __zshspy_r="${s//(#m)[$'\x00'-$'\x1f'\"\\]/${__zshspy_json_esc[$MATCH]}}"
   }
 
   __zshspy_json_string() {

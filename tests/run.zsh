@@ -668,6 +668,49 @@ test_foreground_not_adopted() {
   zsh_spy_check $? "t23: every record parses as strict JSON"
 }
 
+# T24: JSON escaping is exhaustive and reversible.  No pty: source the
+# archive in an interactive -c shell (the helpers are only defined under
+# `[[ -o interactive ]]`) and fuzz __zshspy_json_string over every C0
+# control, quote, backslash, DEL and some multibyte text, then check each
+# escaped record is strict JSON that decodes back to the original.  NUL is
+# checked separately because it also serves as the raw-string separator.
+test_json_escape() {
+  print -r -- "T24 JSON escaping"
+  local dir="$ZSH_SPY_WORK/t24"
+  mkdir -p -- "$dir"
+  if ! command -v python3 >/dev/null 2>&1; then
+    zsh_spy_check 0 "t24: skipped (python3 unavailable)"
+    return 0
+  fi
+  env ZSH_SPY_DIR="$dir" ZSH_SPY_SRC="$ZSH_SPY_SRC" zsh -f -i -c 'source "$ZSH_SPY_SRC"
+typeset -a pool
+typeset -i i n
+for i in {1..31} {34..47} {58..64} {91..96} {123..126} 127; do pool+=( "${(#)i}" ); done
+pool+=( a z 0 9 " " "\\" "\"" / "é" "日本" "😀" )
+: > "$ZSH_SPY_DIR/in.bin"; : > "$ZSH_SPY_DIR/out.txt"
+repeat 4000; do
+  s=""; n=$(( RANDOM % 12 ))
+  repeat $n; do s+="${pool[RANDOM % ${#pool} + 1]}"; done
+  __zshspy_json_string "$s"
+  print -rn -- "$s${(#)0}" >> "$ZSH_SPY_DIR/in.bin"
+  print -r  -- "$__zshspy_r" >> "$ZSH_SPY_DIR/out.txt"
+done
+'
+  D="$dir" python3 -c 'import json,sys,os
+d=os.environ["D"]
+raw=open(d+"/in.bin","rb").read().split(b"\0")[:-1]
+esc=open(d+"/out.txt","rb").read().decode("utf-8","surrogateescape").splitlines()
+assert len(raw)==len(esc),(len(raw),len(esc))
+for r,e in zip(raw,esc):
+    assert json.loads(e)==r.decode("utf-8","surrogateescape"),(r,e)
+'
+  zsh_spy_check $? "t24: fuzzed strings escape to strict JSON that round-trips"
+  local out
+  out="$(env ZSH_SPY_DIR="$dir" ZSH_SPY_SRC="$ZSH_SPY_SRC" zsh -f -i -c 'source "$ZSH_SPY_SRC"; __zshspy_json_string "a${(#)0}b"; print -r -- "$__zshspy_r"')"
+  [[ $out == '"a\u0000b"' ]]
+  zsh_spy_check $? "t24: NUL escapes to \\u0000 (got $out)"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -706,6 +749,7 @@ main() {
     test_user_trap_isolation
     test_interrupted_hook_recovers
     test_foreground_not_adopted
+    test_json_escape
   )
   (( $# )) && tests=( "$@" )
   local t
