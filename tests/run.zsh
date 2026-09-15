@@ -711,6 +711,75 @@ for r,e in zip(raw,esc):
   zsh_spy_check $? "t24: NUL escapes to \\u0000 (got $out)"
 }
 
+# T25: status decoding sweep.  Background jobs that exit with assorted
+# codes must report those codes verbatim (kind "exit"), and jobs killed by
+# a signal must report 128+signum (kind "signaled"); a real-time signal,
+# which zsh cannot name, must report null.  This is a property check over
+# many values, not a single case.
+test_status_decoding() {
+  print -r -- "T25 status decoding sweep"
+  local file ae
+  local -a codes; codes=( 0 1 2 42 126 127 255 )
+  local -a sigs;  sigs=( HUP INT KILL TERM USR1 SEGV )
+  local -a cmds; cmds=()
+  # Each killed job gets a unique numeric duration so its record is easy to
+  # find; "sleep 300.<n>" is a valid, safely long interval.
+  local c s; local -i idx=0
+  for c in "${codes[@]}"; do cmds+=( "zsh -c 'exit $c' & sleep 0.4" ); done
+  for s in "${sigs[@]}"; do
+    (( idx++ )); cmds+=( "sleep 300.$idx & sleep 0.15; kill -$s %1; sleep 0.4" )
+  done
+  cmds+=( "sleep 300.99 & sleep 0.15; kill -34 %1; sleep 0.4" )
+  zsh_spy_session t25 SOURCE "${cmds[@]}"
+  file="$REPLY"
+  local -i fails=0 num
+  for c in "${codes[@]}"; do
+    zsh_spy_first_record "$file" async_end "\"job_text\":\"zsh -c 'exit $c'\""; ae="$REPLY"
+    [[ $ae == *"\"status\":$c,\"status_kind\":\"exit\""* ]] || { (( fails++ )); print -r -- "  exit $c: ${ae:-<none>}"; }
+  done
+  zsh_spy_check $fails "t25: exit codes decode verbatim ($fails mismatches)"
+  fails=0; idx=0
+  for s in "${sigs[@]}"; do
+    (( idx++ )); num=$(( ${signals[(i)$s]} - 1 ))
+    zsh_spy_first_record "$file" async_end "\"job_text\":\"sleep 300.$idx\""; ae="$REPLY"
+    [[ $ae == *"\"status\":$(( 128 + num )),\"status_kind\":\"signaled\""* ]] || { (( fails++ )); print -r -- "  $s: ${ae:-<none>}"; }
+  done
+  zsh_spy_check $fails "t25: signal deaths decode to 128+signum ($fails mismatches)"
+  zsh_spy_first_record "$file" async_end '"job_text":"sleep 300.99"'; ae="$REPLY"
+  [[ $ae == *'"status":null,"status_kind":"signaled"'* ]]
+  zsh_spy_check $? "t25: a real-time signal reports null / signaled"
+}
+
+# T26: exactly-once invariants under many jobs.  Every background job that
+# the archive records must get exactly one async_start and one async_end
+# and never async_lost; no (id, job) pair may repeat.  These hold over
+# whatever was captured.  Exact totals are deliberately not asserted: a
+# burst of jobs exiting in the same instant can coalesce their SIGCHLD and
+# occasionally outrun observation, a documented loss (see the header), so
+# the test asserts a generous floor rather than a precise count.
+test_many_jobs() {
+  print -r -- "T26 exactly-once under many jobs"
+  local file
+  zsh_spy_session t26 SOURCE \
+    'for i in {10..29}; do sleep 0.$i & done; sleep 2.5' \
+    'for i in {1..8}; do sleep 1.$i & done' \
+    'sleep 3.5' \
+    'zsh -c "exit 9" & zsh -c "exit 7" & sleep 1'
+  file="$REPLY"
+  zsh_spy_json_valid "$file"
+  zsh_spy_check $? "t26: every record parses as strict JSON"
+  local -i starts ends lost uniq_start uniq_end
+  zsh_spy_count_records "$file" async_start; starts=$REPLY
+  zsh_spy_count_records "$file" async_end;   ends=$REPLY
+  zsh_spy_count_records "$file" async_lost;  lost=$REPLY
+  uniq_start=$(grep '"type":"async_start"' "$file" | sed -E 's/.*"id":"([^"]*)".*"job":([0-9]+).*/\1 \2/' | sort -u | wc -l)
+  uniq_end=$(grep '"type":"async_end"' "$file" | sed -E 's/.*"id":"([^"]*)".*"job":([0-9]+).*/\1 \2/' | sort -u | wc -l)
+  zsh_spy_check $(( starts != ends )) "t26: async_start and async_end counts match ($starts vs $ends)"
+  zsh_spy_check $(( lost != 0 )) "t26: no async_lost, got $lost"
+  zsh_spy_check $(( uniq_start != starts || uniq_end != ends )) "t26: no duplicate (id,job) records ($uniq_start/$starts start, $uniq_end/$ends end)"
+  zsh_spy_check $(( starts < 28 )) "t26: the vast majority of 30 jobs were captured, got $starts"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -750,6 +819,8 @@ main() {
     test_interrupted_hook_recovers
     test_foreground_not_adopted
     test_json_escape
+    test_status_decoding
+    test_many_jobs
   )
   (( $# )) && tests=( "$@" )
   local t

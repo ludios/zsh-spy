@@ -83,6 +83,9 @@
 #   EXTENDED_HISTORY it sets as the function returns; source it at top level.
 # - Background jobs launched by other precmd/preexec hooks are attributed to a
 #   neighbouring command or missed, depending on hook order.
+# - A burst of background jobs finishing in the same instant can coalesce
+#   their SIGCHLD delivery; a job reaped before the trap observes it is
+#   occasionally missed. Simultaneous exits, not ordinary use, trigger this.
 
 if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   setopt EXTENDED_HISTORY
