@@ -564,6 +564,31 @@ test_async_jobs_under_lock() {
   zsh_spy_check $? "t19: command_end lists the job adopted before the lock was taken"
 }
 
+# T20: the archive must not pass results through REPLY, because a chained
+# user TRAPCHLD runs in the wrapper's dynamic scope and can assign REPLY
+# between a helper setting it and its caller reading it.  The wrapped
+# helper busy-waits at exactly that point while a background job completes;
+# the record used to come out as `"reason":user`, which is not JSON.  The
+# user trap's own assignment must still land in the user's REPLY.
+test_user_trap_reply_clobber() {
+  print -r -- "T20 user trap assigning REPLY"
+  local file
+  zsh_spy_session t20 'TRAPCHLD() { REPLY=user }' SOURCE \
+    'functions -c __zshspy_json_string __orig_js; __zshspy_json_string() { __orig_js "$@"; if [[ $1 == precmd ]]; then repeat 2000000; do :; done; fi }' \
+    'sleep 0.3 & sleep 0.1' \
+    'sleep 0.6' \
+    'print -r -- "REPLY:$REPLY" > "$ZSH_SPY_DIR/reply.txt"'
+  file="$REPLY"
+  zsh_spy_json_valid "$file"
+  zsh_spy_check $? "t20: every record is valid JSON with a REPLY-assigning user trap"
+  zsh_spy_first_record "$file" command_start 'sleep 0.3 & sleep 0.1'
+  zsh_spy_field "$REPLY" id
+  zsh_spy_first_record "$file" command_end "\"id\":\"$REPLY\"" && [[ $REPLY == *'"reason":"precmd"'* ]]
+  zsh_spy_check $? "t20: the interleaved command_end kept its reason"
+  grep -qx 'REPLY:user' "$ZSH_SPY_WORK/t20/reply.txt"
+  zsh_spy_check $? "t20: the user trap's REPLY assignment reaches the user's shell"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -598,6 +623,7 @@ main() {
     test_reload_with_active_job
     test_stderr_visible
     test_async_jobs_under_lock
+    test_user_trap_reply_clobber
   )
   (( $# )) && tests=( "$@" )
   local t

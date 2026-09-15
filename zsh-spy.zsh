@@ -190,13 +190,13 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     s="${s//$'\035'/\\u001d}"
     s="${s//$'\036'/\\u001e}"
     s="${s//$'\037'/\\u001f}"
-    REPLY="$s"
+    __zshspy_r="$s"
   }
 
   __zshspy_json_string() {
     emulate -L zsh
     __zshspy_json_escape "$1"
-    REPLY="\"$REPLY\""
+    __zshspy_r="\"$__zshspy_r\""
   }
 
   # Close the archive descriptor exactly once.
@@ -318,7 +318,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local start_s="$1" start_ns="$2" end_s="$3" end_ns="$4"
     local d_s d_ns
     if [[ -z $start_s || -z $start_ns || -z $end_s || -z $end_ns ]]; then
-      REPLY='"duration_s":null,"duration_ns":null'
+      __zshspy_r='"duration_s":null,"duration_ns":null'
       return 0
     fi
     (( d_s = end_s - start_s ))
@@ -328,9 +328,9 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       (( d_ns += 1000000000 ))
     fi
     if (( d_s < 0 )); then
-      REPLY='"duration_s":null,"duration_ns":null'
+      __zshspy_r='"duration_s":null,"duration_ns":null'
     else
-      REPLY="\"duration_s\":$d_s,\"duration_ns\":$d_ns"
+      __zshspy_r="\"duration_s\":$d_s,\"duration_ns\":$d_ns"
     fi
   }
 
@@ -395,14 +395,14 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   # Parse one process state from a $jobstates pid=state segment.
   #   $1: the state text, e.g. "done", "exit 2", "running", "terminated",
   #       "segmentation fault (core dumped)".
-  # Sets REPLY to the JSON value for the status field (number or null) and
-  # REPLY2 to the status kind:
-  #   exit      normal exit; REPLY is the exit code 0..255.  zsh master
+  # Sets __zshspy_r to the JSON value for the status field (number or null) and
+  # __zshspy_r2 to the status kind:
+  #   exit      normal exit; __zshspy_r is the exit code 0..255.  zsh master
   #             prints WEXITSTATUS here (pmjobstate,
   #             Src/Modules/parameter.c:1377); zsh <= 5.9 prints the raw
   #             wait status, code<<8.  Both encodings are normalized to
   #             the plain code.
-  #   signaled  killed by a signal; REPLY is 128+signum in the shell's own
+  #   signaled  killed by a signal; __zshspy_r is 128+signum in the shell's own
   #             $? convention, or null when the signal cannot be identified
   #             (real-time signals: SIGRTMIN is not knowable from zsh).
   #   unknown   anything else (running/suspended states, parse failures).
@@ -410,11 +410,11 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     emulate -L zsh
     local state="$1"
     local raw base idx
-    REPLY=null
-    REPLY2=unknown
+    __zshspy_r=null
+    __zshspy_r2=unknown
     if [[ $state == done ]]; then
-      REPLY=0
-      REPLY2=exit
+      __zshspy_r=0
+      __zshspy_r2=exit
       return 0
     fi
     if [[ $state == exit\ * ]]; then
@@ -427,11 +427,11 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
         # output is 1..255, while a raw wait status for a normal exit is
         # code<<8, always a positive multiple of 256.
         if (( raw > 255 && raw % 256 == 0 )); then
-          REPLY=$(( raw / 256 ))
+          __zshspy_r=$(( raw / 256 ))
         else
-          REPLY=$raw
+          __zshspy_r=$raw
         fi
-        REPLY2=exit
+        __zshspy_r2=exit
       fi
       return 0
     fi
@@ -443,20 +443,20 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     base="${state%" (core dumped)"}"
     __zshspy_init_sigmsg_map
     if [[ -n ${__zshspy_sigmsg_num[$base]-} ]]; then
-      REPLY=$(( 128 + __zshspy_sigmsg_num[$base] ))
-      REPLY2=signaled
+      __zshspy_r=$(( 128 + __zshspy_sigmsg_num[$base] ))
+      __zshspy_r2=signaled
     elif [[ $base == SIG[A-Z0-9]* ]]; then
       # Signals without a message entry print as SIG<NAME>
       # (Src/signames2.awk END block).
       idx=${signals[(i)${base#SIG}]}
       if (( idx <= ${#signals} )); then
-        REPLY=$(( 128 + idx - 1 ))
+        __zshspy_r=$(( 128 + idx - 1 ))
       fi
-      REPLY2=signaled
+      __zshspy_r2=signaled
     elif [[ $base == real-time\ event\ * || $base == unknown\ signal ]]; then
       # sigmsg() output for SIGRTMIN..SIGRTMAX and out-of-range numbers
       # (Src/jobs.c:1116-1127); no portable number is derivable.
-      REPLY2=signaled
+      __zshspy_r2=signaled
     fi
   }
 
@@ -472,7 +472,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       pid="${seg%%=*}"
       [[ -n $pid ]] && pids+=( "$pid" )
     done
-    REPLY="${(j:,:)pids}"
+    __zshspy_r="${(j:,:)pids}"
   }
 
   __zshspy_processes_json() {
@@ -487,21 +487,21 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       pid="${seg%%=*}"
       state="${seg#*=}"
       __zshspy_status_from_proc_state "$state"
-      status_json="$REPLY"
-      status_kind="$REPLY2"
+      status_json="$__zshspy_r"
+      status_kind="$__zshspy_r2"
       __zshspy_json_string "$state"
-      qstate="$REPLY"
+      qstate="$__zshspy_r"
       case "$pid" in
         (""|*[!0-9]*)
           __zshspy_json_string "$pid"
-          items+=( "{\"pid\":$REPLY,\"state\":$qstate,\"status\":$status_json,\"status_kind\":\"$status_kind\"}" )
+          items+=( "{\"pid\":$__zshspy_r,\"state\":$qstate,\"status\":$status_json,\"status_kind\":\"$status_kind\"}" )
           ;;
         (*)
           items+=( "{\"pid\":$pid,\"state\":$qstate,\"status\":$status_json,\"status_kind\":\"$status_kind\"}" )
           ;;
       esac
     done
-    REPLY="[${(j:,:)items}]"
+    __zshspy_r="[${(j:,:)items}]"
   }
 
   __zshspy_job_summary_fields() {
@@ -514,27 +514,27 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     mark="${parts[2]-}"
     text="${jobtexts[$job]-}"
     dir="${jobdirs[$job]-}"
-    __zshspy_job_pids_csv "$js"; pids="$REPLY"
-    __zshspy_processes_json "$js"; processes_json="$REPLY"
-    __zshspy_json_string "$job_state"; qjob_state="$REPLY"
-    __zshspy_json_string "$mark"; qmark="$REPLY"
-    __zshspy_json_string "$text"; qtext="$REPLY"
-    __zshspy_json_string "$dir"; qdir="$REPLY"
-    REPLY="\"job\":$job,\"job_state\":$qjob_state,\"job_mark\":$qmark,\"job_pids\":\"$pids\",\"job_text\":$qtext,\"job_dir\":$qdir,\"processes\":$processes_json"
+    __zshspy_job_pids_csv "$js"; pids="$__zshspy_r"
+    __zshspy_processes_json "$js"; processes_json="$__zshspy_r"
+    __zshspy_json_string "$job_state"; qjob_state="$__zshspy_r"
+    __zshspy_json_string "$mark"; qmark="$__zshspy_r"
+    __zshspy_json_string "$text"; qtext="$__zshspy_r"
+    __zshspy_json_string "$dir"; qdir="$__zshspy_r"
+    __zshspy_r="\"job\":$job,\"job_state\":$qjob_state,\"job_mark\":$qmark,\"job_pids\":\"$pids\",\"job_text\":$qtext,\"job_dir\":$qdir,\"processes\":$processes_json"
   }
 
   __zshspy_log_session_start() {
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qsession qts qhost quser qfile qzver
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_json_string "$__zshspy_host"; qhost="$REPLY"
-    __zshspy_json_string "$__zshspy_user"; quser="$REPLY"
-    __zshspy_json_string "$__zshspy_file"; qfile="$REPLY"
-    __zshspy_json_string "${ZSH_VERSION:-}"; qzver="$REPLY"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_host"; qhost="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_user"; quser="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_file"; qfile="$__zshspy_r"
+    __zshspy_json_string "${ZSH_VERSION:-}"; qzver="$__zshspy_r"
     local bg_json notify_json
     (( __zshspy_bg_enabled )) && bg_json=true || bg_json=false
     (( __zshspy_notify_was_on )) && notify_json=true || notify_json=false
@@ -545,16 +545,16 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     emulate -L zsh
     local id="$1" typed="$2" expanded="$3" short="$4"
     local qid qsession qts qhost quser qcwd qtty qtyped qexpanded qshort
-    __zshspy_json_string "$id"; qid="$REPLY"
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_json_string "$__zshspy_host"; qhost="$REPLY"
-    __zshspy_json_string "$__zshspy_user"; quser="$REPLY"
-    __zshspy_json_string "$PWD"; qcwd="$REPLY"
-    __zshspy_json_string "${TTY:-}"; qtty="$REPLY"
-    __zshspy_json_string "$typed"; qtyped="$REPLY"
-    __zshspy_json_string "$expanded"; qexpanded="$REPLY"
-    __zshspy_json_string "$short"; qshort="$REPLY"
+    __zshspy_json_string "$id"; qid="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_host"; qhost="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_user"; quser="$__zshspy_r"
+    __zshspy_json_string "$PWD"; qcwd="$__zshspy_r"
+    __zshspy_json_string "${TTY:-}"; qtty="$__zshspy_r"
+    __zshspy_json_string "$typed"; qtyped="$__zshspy_r"
+    __zshspy_json_string "$expanded"; qexpanded="$__zshspy_r"
+    __zshspy_json_string "$short"; qshort="$__zshspy_r"
     __zshspy_write "{\"type\":\"command_start\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"seq\":$__zshspy_seq,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"cwd\":$qcwd,\"tty\":$qtty,\"shell_pid\":$__zshspy_shell_pid,\"histcmd\":${HISTCMD:-0},\"command\":$qtyped,\"command_expanded\":$qexpanded,\"command_short\":$qshort}"
   }
 
@@ -564,13 +564,13 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts qcwd qreason duration_fields
-    __zshspy_json_string "$id"; qid="$REPLY"
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_json_string "$PWD"; qcwd="$REPLY"
-    __zshspy_json_string "$reason"; qreason="$REPLY"
+    __zshspy_json_string "$id"; qid="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_json_string "$PWD"; qcwd="$__zshspy_r"
+    __zshspy_json_string "$reason"; qreason="$__zshspy_r"
     __zshspy_duration_json_fields "${__zshspy_cmd_start_s[$id]-}" "${__zshspy_cmd_start_ns[$id]-}" "$__zshspy_now_s" "$__zshspy_now_ns"
-    duration_fields="$REPLY"
+    duration_fields="$__zshspy_r"
     [[ -z $async_jobs_json ]] && async_jobs_json="[]"
     __zshspy_write "{\"type\":\"command_end\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"cwd\":$qcwd,\"async_jobs\":$async_jobs_json,\"reason\":$qreason,$duration_fields}"
     unset "__zshspy_cmd_start_s[$id]" "__zshspy_cmd_start_ns[$id]"
@@ -582,10 +582,10 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts job_fields
-    __zshspy_json_string "$id"; qid="$REPLY"
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_job_summary_fields "$job" "$js"; job_fields="$REPLY"
+    __zshspy_json_string "$id"; qid="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_job_summary_fields "$job" "$js"; job_fields="$__zshspy_r"
     __zshspy_write "{\"type\":\"async_start\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,$job_fields}"
   }
 
@@ -603,14 +603,14 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       last_state=""
     fi
     __zshspy_status_from_proc_state "$last_state"
-    status_json="$REPLY"
-    status_kind="$REPLY2"
-    __zshspy_json_string "$id"; qid="$REPLY"
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_job_summary_fields "$job" "$js"; job_fields="$REPLY"
+    status_json="$__zshspy_r"
+    status_kind="$__zshspy_r2"
+    __zshspy_json_string "$id"; qid="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_job_summary_fields "$job" "$js"; job_fields="$__zshspy_r"
     __zshspy_duration_json_fields "${__zshspy_job_start_s[$job]-}" "${__zshspy_job_start_ns[$job]-}" "$__zshspy_now_s" "$__zshspy_now_ns"
-    duration_fields="$REPLY"
+    duration_fields="$__zshspy_r"
     __zshspy_write "{\"type\":\"async_end\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$status_json,\"status_kind\":\"$status_kind\",$job_fields,$duration_fields}"
   }
 
@@ -620,12 +620,12 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
     local qid qsession qts qreason duration_fields
-    __zshspy_json_string "$id"; qid="$REPLY"
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_json_string "$reason"; qreason="$REPLY"
+    __zshspy_json_string "$id"; qid="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_json_string "$reason"; qreason="$__zshspy_r"
     __zshspy_duration_json_fields "${__zshspy_job_start_s[$job]-}" "${__zshspy_job_start_ns[$job]-}" "$__zshspy_now_s" "$__zshspy_now_ns"
-    duration_fields="$REPLY"
+    duration_fields="$__zshspy_r"
     __zshspy_write "{\"type\":\"async_lost\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"job\":$job,\"reason\":$qreason,$duration_fields}"
   }
 
@@ -685,7 +685,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_process_done_jobs() {
     local _save_status=$?
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     (( __zshspy_enabled && __zshspy_bg_enabled &&
        ! __zshspy_finalizing && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
 
@@ -702,7 +702,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           unset "__zshspy_job_logged_done[$job]"
         else
           __zshspy_job_pids_csv "${jobstates[$job]}"
-          if [[ $REPLY != "${__zshspy_job_logged_done[$job]}" ]]; then
+          if [[ $__zshspy_r != "${__zshspy_job_logged_done[$job]}" ]]; then
             unset "__zshspy_job_logged_done[$job]"
           fi
         fi
@@ -721,7 +721,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
 
         js="${jobstates[$job]}"
         __zshspy_job_pids_csv "$js"
-        cur_pids="$REPLY"
+        cur_pids="$__zshspy_r"
         expected_pids="${__zshspy_job_pids[$job]-}"
         if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
           __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
@@ -747,7 +747,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           js="${jobstates[$job]}"
           [[ ${js%%:*} == done ]] || continue
           __zshspy_job_pids_csv "$js"
-          cur_pids="$REPLY"
+          cur_pids="$__zshspy_r"
           if [[ -n ${__zshspy_jobs_before_pids[$job]+x} &&
                 $cur_pids == "${__zshspy_jobs_before_pids[$job]}" ]]; then
             continue
@@ -779,7 +779,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
 
   __zshspy_preexec() {
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     (( __zshspy_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
 
@@ -805,7 +805,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
         local j
         for j in "${(@k)jobstates}"; do
           __zshspy_job_pids_csv "${jobstates[$j]}"
-          __zshspy_jobs_before_pids[$j]="$REPLY"
+          __zshspy_jobs_before_pids[$j]="$__zshspy_r"
         done
         __zshspy_jobs_before_valid=1
       fi
@@ -831,7 +831,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local last_status="$1" reason="${2:-precmd}"
     local -i final_job_pass="${3:-0}"
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     local id="$__zshspy_cur_id"
     [[ -n $id ]] || return $last_status
 
@@ -848,7 +848,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
         for j in "${(@k)jobstates}"; do
           (( ${+__zshspy_job_cmd_id[$j]} )) && continue
           __zshspy_job_pids_csv "${jobstates[$j]}"
-          current_pids="$REPLY"
+          current_pids="$__zshspy_r"
           before_pids="${__zshspy_jobs_before_pids[$j]-}"
           if (( ${+__zshspy_job_logged_done[$j]} )) &&
              [[ ${__zshspy_job_logged_done[$j]} == "$current_pids" ]]; then
@@ -864,7 +864,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           (( ${+jobstates[$j]} )) || continue
           js="${jobstates[$j]}"
           __zshspy_job_pids_csv "$js"
-          current_pids="$REPLY"
+          current_pids="$__zshspy_r"
           if (( ${+__zshspy_job_logged_done[$j]} )) &&
              [[ ${__zshspy_job_logged_done[$j]} == "$current_pids" ]]; then
             continue
@@ -877,7 +877,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           case "$j" in
             (""|*[!0-9]*)
               __zshspy_json_string "$j"
-              items+=( "$REPLY" )
+              items+=( "$__zshspy_r" )
               ;;
             (*)
               items+=( "$j" )
@@ -903,7 +903,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_precmd() {
     local last_status=$?
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     (( __zshspy_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
 
     __zshspy_finish_current_command "$last_status" "precmd"
@@ -917,12 +917,12 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_log_session_end() {
     emulate -L zsh
     local _status="$1" reason="$2"
-    local REPLY REPLY2 qsession qts qreason
+    local __zshspy_r __zshspy_r2 qsession qts qreason
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
-    __zshspy_json_string "$__zshspy_session_id"; qsession="$REPLY"
-    __zshspy_json_string "$__zshspy_now_ts"; qts="$REPLY"
-    __zshspy_json_string "$reason"; qreason="$REPLY"
+    __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
+    __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
+    __zshspy_json_string "$reason"; qreason="$__zshspy_r"
     __zshspy_write "{\"type\":\"session_end\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"reason\":$qreason}"
   }
 
@@ -936,7 +936,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_finalize() {
     local reason="$1" final_status="$2"
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     local -i final_job_pass=0
     (( __zshspy_enabled && ! __zshspy_finalizing &&
        ${ZSH_SUBSHELL:-0} == 0 )) || return $final_status
@@ -973,7 +973,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
 
       js="${jobstates[$job]}"
       __zshspy_job_pids_csv "$js"
-      cur_pids="$REPLY"
+      cur_pids="$__zshspy_r"
       expected_pids="${__zshspy_job_pids[$job]-}"
       if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
         __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
@@ -1060,7 +1060,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_zshexit() {
     local exit_status=$?
     emulate -L zsh
-    local REPLY REPLY2
+    local __zshspy_r __zshspy_r2
     __zshspy_finalize "zshexit" "$exit_status"
     return 0
   }
