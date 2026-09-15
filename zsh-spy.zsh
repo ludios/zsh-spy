@@ -683,6 +683,23 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     return 0
   }
 
+  # The terminal's foreground process group, or "" when it cannot be read
+  # (no Linux /proc, no controlling terminal).  Field tpgid of
+  # /proc/self/stat, taken after the last ") " because the comm field before
+  # it may contain spaces.
+  # No arguments.  Sets __zshspy_r.
+  __zshspy_fg_pgrp() {
+    emulate -L zsh
+    local stat
+    __zshspy_r=""
+    [[ -r /proc/self/stat ]] || return 0
+    read -r stat < /proc/self/stat 2>/dev/null || return 0
+    stat="${stat##*\) }"
+    __zshspy_r="${${(s: :)stat}[6]}"
+    [[ $__zshspy_r == <1-> ]] || __zshspy_r=""
+    return 0
+  }
+
   # Emit async_end / async_lost records for tracked background jobs, and adopt
   # completed jobs that precmd can never see.  A job spawned by the in-flight
   # command line that also finishes before that line does is reported and
@@ -700,7 +717,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     (( __zshspy_enabled && __zshspy_bg_enabled &&
        ! __zshspy_finalizing && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
 
-    local job id js job_state cur_pids expected_pids
+    local job id js job_state cur_pids expected_pids fg_pgrp
     {
       __zshspy_jobs_lock || return 0
       while true; do
@@ -749,16 +766,22 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
           fi
         done
 
-        # Adopt a completed background job that did not exist in preexec's
-        # snapshot.  Foreground jobs have already been removed before queued CHLD
-        # traps run, so a done job reached here is a background job.
+        # Adopt a completed job that did not exist in preexec's snapshot.  zsh
+        # runs this trap for every job except the one it is waiting on, so the
+        # finished foreground job itself can still be in the table: it is the
+        # job whose leader owns the terminal.  (A pipeline head whose
+        # current-shell tail is running an external command holds no terminal
+        # and cannot be told from a background job; see the header.)
         if [[ -n $__zshspy_cur_id ]] && (( __zshspy_jobs_before_valid )); then
+          __zshspy_fg_pgrp
+          fg_pgrp="$__zshspy_r"
           for job in "${(@k)jobstates}"; do
             (( ${+__zshspy_job_cmd_id[$job]} )) && continue
             js="${jobstates[$job]}"
             [[ ${js%%:*} == done ]] || continue
             __zshspy_job_pids_csv "$js"
             cur_pids="$__zshspy_r"
+            [[ -n $fg_pgrp && ${cur_pids%%,*} == "$fg_pgrp" ]] && continue
             if [[ -n ${__zshspy_jobs_before_pids[$job]+x} &&
                   $cur_pids == "${__zshspy_jobs_before_pids[$job]}" ]]; then
               continue
@@ -783,7 +806,6 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
 
         (( __zshspy_jobs_pending )) || break
       done
-
     } always {
       (( __zshspy_jobs_locked )) && __zshspy_jobs_unlock
     }

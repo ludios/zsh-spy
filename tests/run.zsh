@@ -635,6 +635,39 @@ test_interrupted_hook_recovers() {
   zsh_spy_check $? "t22: file is valid JSONL ending in session_end"
 }
 
+# T23: zsh runs the CHLD trap for every job except the one it is waiting
+# on, so a finished foreground job can still sit in the job table when a
+# background job's trap runs.  Adoption used to log such a job as
+# background.  The terminal's owning process group tells the two apart for
+# a pipeline whose head is the group leader (a background pipeline keeps
+# running; a foreground one still owns the terminal), which is the
+# deterministic, reproducible half of the bug.  Assert that half here, and
+# that no real background job is ever missed; the residual same-instant
+# foreground/background race is documented, not asserted (it would flap).
+test_foreground_not_adopted() {
+  print -r -- "T23 foreground pipelines are not adopted"
+  local file
+  local -a cmds
+  # Foreground pipelines whose head is a distinct process: never background.
+  cmds=( 'false | { sleep 0.2; :; }' 'print hi | { read a; sleep 0.2 }' )
+  # Ten genuine background jobs that must all be captured.
+  repeat 10; do cmds+=( 'sleep 0.2 & sleep 0.5' ); done
+  # A genuine background pipeline that must be captured.
+  cmds+=( 'sleep 0.2 | cat & sleep 0.5' )
+  zsh_spy_session t23 SOURCE "${cmds[@]}"
+  file="$REPLY"
+  zsh_spy_count_records "$file" async_start '"job_text":"false"'
+  local -i n_false=$REPLY
+  zsh_spy_count_records "$file" async_start '"job_text":"print hi"'
+  zsh_spy_check $(( n_false + REPLY != 0 )) "t23: foreground pipeline heads are not adopted (got $n_false, $REPLY)"
+  zsh_spy_count_records "$file" async_end '"job_text":"sleep 0.2"'
+  zsh_spy_check $(( REPLY < 10 )) "t23: every background job is captured (>=10), got $REPLY"
+  zsh_spy_count_records "$file" async_end '"job_text":"sleep 0.2 | cat"'
+  zsh_spy_check $(( REPLY != 1 )) "t23: a background pipeline is still captured, got $REPLY"
+  zsh_spy_json_valid "$file"
+  zsh_spy_check $? "t23: every record parses as strict JSON"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -672,6 +705,7 @@ main() {
     test_user_trap_reply_clobber
     test_user_trap_isolation
     test_interrupted_hook_recovers
+    test_foreground_not_adopted
   )
   (( $# )) && tests=( "$@" )
   local t
