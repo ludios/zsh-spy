@@ -609,6 +609,32 @@ test_user_trap_isolation() {
   zsh_spy_check $? "t21: user trap still called with the interrupted status under ERR_RETURN"
 }
 
+# T22: Ctrl-C aborts running hook code at the next statement boundary.  An
+# interrupt landing while precmd held the writer flag and the jobs lock
+# used to leave both set for the rest of the session: no async records
+# were ever produced again and every record piled up in the in-memory
+# queue.  The wrapped writer busy-waits once (during the arming line's own
+# command_end) so the harness can land the interrupt inside the locks.
+test_interrupted_hook_recovers() {
+  print -r -- "T22 hook interrupted by Ctrl-C"
+  local file
+  zsh_spy_session t22 SOURCE \
+    'functions -c __zshspy_raw_write __orig_raw_write; typeset -gi __spun=0; __zshspy_raw_write() { if (( ! __spun )); then __spun=1; repeat 4000000; do :; done; fi; __orig_raw_write "$@" }' \
+    $'\x03' \
+    'sleep 0.3 &' \
+    'sleep 0.8' \
+    'print -r -- "busy=$__zshspy_jobs_busy writing=$__zshspy_writing queue=${#__zshspy_queue}" > "$ZSH_SPY_DIR/locks.txt"'
+  file="$REPLY"
+  grep -qx 'busy=0 writing=0 queue=0' "$ZSH_SPY_WORK/t22/locks.txt"
+  zsh_spy_check $? "t22: locks released and queue empty after the interrupt (got '$(cat "$ZSH_SPY_WORK/t22/locks.txt" 2>/dev/null)')"
+  zsh_spy_first_record "$file" async_end
+  zsh_spy_check $? "t22: a background job started after the interrupt is still tracked"
+  zsh_spy_first_record "$file" command_end '"reason":"precmd"' && zsh_spy_first_record "$file" command_start 'sleep 0.8'
+  zsh_spy_check $? "t22: commands after the interrupt are still logged"
+  zsh_spy_json_valid "$file" && [[ "$(tail -n 1 -- "$file")" == *'"type":"session_end"'* ]]
+  zsh_spy_check $? "t22: file is valid JSONL ending in session_end"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -645,6 +671,7 @@ main() {
     test_async_jobs_under_lock
     test_user_trap_reply_clobber
     test_user_trap_isolation
+    test_interrupted_hook_recovers
   )
   (( $# )) && tests=( "$@" )
   local t

@@ -302,14 +302,20 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       return 0
     fi
 
-    __zshspy_writing=1
-    __zshspy_raw_write "$line" || true
-    while true; do
-      __zshspy_drain_queue
-      __zshspy_writing=0
-      (( ${#__zshspy_queue[@]} )) || break
+    {
       __zshspy_writing=1
-    done
+      __zshspy_raw_write "$line" || true
+      while true; do
+        __zshspy_drain_queue
+        __zshspy_writing=0
+        (( ${#__zshspy_queue[@]} )) || break
+        __zshspy_writing=1
+      done
+    } always {
+      # An interrupt (Ctrl-C) aborting the write must not leave the flag set,
+      # or every later record would queue in memory until session end.
+      __zshspy_writing=0
+    }
     return 0
   }
 
@@ -648,13 +654,18 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   # lock that trap could observe the same map entry and emit a duplicate
   # lifecycle.  The line writer only protects JSONL bytes, not map semantics.
   # Returns 0 to the lock owner, 1 to a reentrant caller (and marks work pending).
+  # The owner's record of ownership, its local __zshspy_jobs_locked, is set in
+  # the same statement as the lock: an interrupt (Ctrl-C) lands between two
+  # statements and could otherwise leave a lock that nobody releases.  Every
+  # caller declares that local and releases in an always block, which zsh
+  # runs even when the try block was interrupted.
   __zshspy_jobs_lock() {
     emulate -L zsh
     if (( __zshspy_jobs_busy )); then
       __zshspy_jobs_pending=1
       return 1
     fi
-    __zshspy_jobs_busy=1
+    (( __zshspy_jobs_busy = __zshspy_jobs_locked = 1 ))
     return 0
   }
 
@@ -685,94 +696,97 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   __zshspy_process_done_jobs() {
     emulate -L zsh
     local __zshspy_r __zshspy_r2
+    local -i __zshspy_jobs_locked=0
     (( __zshspy_enabled && __zshspy_bg_enabled &&
        ! __zshspy_finalizing && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
 
-    __zshspy_jobs_lock || return 0
-
     local job id js job_state cur_pids expected_pids
-    while true; do
-      __zshspy_jobs_pending=0
+    {
+      __zshspy_jobs_lock || return 0
+      while true; do
+        __zshspy_jobs_pending=0
 
-      # Forget completion fingerprints after zsh deletes the old job or reuses
-      # its slot for a different process set.
-      for job in "${(@k)__zshspy_job_logged_done}"; do
-        if (( ! ${+jobstates[$job]} )); then
-          unset "__zshspy_job_logged_done[$job]"
-        else
-          __zshspy_job_pids_csv "${jobstates[$job]}"
-          if [[ $__zshspy_r != "${__zshspy_job_logged_done[$job]}" ]]; then
+        # Forget completion fingerprints after zsh deletes the old job or reuses
+        # its slot for a different process set.
+        for job in "${(@k)__zshspy_job_logged_done}"; do
+          if (( ! ${+jobstates[$job]} )); then
             unset "__zshspy_job_logged_done[$job]"
+          else
+            __zshspy_job_pids_csv "${jobstates[$job]}"
+            if [[ $__zshspy_r != "${__zshspy_job_logged_done[$job]}" ]]; then
+              unset "__zshspy_job_logged_done[$job]"
+            fi
           fi
-        fi
-      done
+        done
 
-      # Reconcile known jobs first.  A job number is only a reusable table slot;
-      # compare the process fingerprint before attributing its current state to
-      # the command that originally occupied that slot.
-      for job in "${(@k)__zshspy_job_cmd_id}"; do
-        id="${__zshspy_job_cmd_id[$job]}"
-        if (( ! ${+jobstates[$job]} )); then
-          __zshspy_log_async_lost "$id" "$job" "missing_from_job_table"
-          __zshspy_forget_job "$job"
-          continue
-        fi
+        # Reconcile known jobs first.  A job number is only a reusable table slot;
+        # compare the process fingerprint before attributing its current state to
+        # the command that originally occupied that slot.
+        for job in "${(@k)__zshspy_job_cmd_id}"; do
+          id="${__zshspy_job_cmd_id[$job]}"
+          if (( ! ${+jobstates[$job]} )); then
+            __zshspy_log_async_lost "$id" "$job" "missing_from_job_table"
+            __zshspy_forget_job "$job"
+            continue
+          fi
 
-        js="${jobstates[$job]}"
-        __zshspy_job_pids_csv "$js"
-        cur_pids="$__zshspy_r"
-        expected_pids="${__zshspy_job_pids[$job]-}"
-        if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
-          __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
-          __zshspy_forget_job "$job"
-          __zshspy_jobs_pending=1
-          continue
-        fi
-
-        job_state="${js%%:*}"
-        if [[ $job_state == done ]]; then
-          __zshspy_job_logged_done[$job]="$cur_pids"
-          __zshspy_log_async_end "$id" "$job" "$js"
-          __zshspy_forget_job "$job"
-        fi
-      done
-
-      # Adopt a completed background job that did not exist in preexec's
-      # snapshot.  Foreground jobs have already been removed before queued CHLD
-      # traps run, so a done job reached here is a background job.
-      if [[ -n $__zshspy_cur_id ]] && (( __zshspy_jobs_before_valid )); then
-        for job in "${(@k)jobstates}"; do
-          (( ${+__zshspy_job_cmd_id[$job]} )) && continue
           js="${jobstates[$job]}"
-          [[ ${js%%:*} == done ]] || continue
           __zshspy_job_pids_csv "$js"
           cur_pids="$__zshspy_r"
-          if [[ -n ${__zshspy_jobs_before_pids[$job]+x} &&
-                $cur_pids == "${__zshspy_jobs_before_pids[$job]}" ]]; then
-            continue
-          fi
-          if (( ${+__zshspy_job_logged_done[$job]} )) &&
-             [[ ${__zshspy_job_logged_done[$job]} == "$cur_pids" ]]; then
+          expected_pids="${__zshspy_job_pids[$job]-}"
+          if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
+            __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
+            __zshspy_forget_job "$job"
+            __zshspy_jobs_pending=1
             continue
           fi
 
-          id="$__zshspy_cur_id"
-          __zshspy_job_cmd_id[$job]="$id"
-          __zshspy_job_start_s[$job]="${__zshspy_cmd_start_s[$id]-}"
-          __zshspy_job_start_ns[$job]="${__zshspy_cmd_start_ns[$id]-}"
-          __zshspy_job_pids[$job]="$cur_pids"
-          __zshspy_log_async_start "$id" "$job" "$js"
-          __zshspy_job_logged_done[$job]="$cur_pids"
-          __zshspy_cur_adopted+=( "$job" )
-          __zshspy_log_async_end "$id" "$job" "$js"
-          __zshspy_forget_job "$job"
+          job_state="${js%%:*}"
+          if [[ $job_state == done ]]; then
+            __zshspy_job_logged_done[$job]="$cur_pids"
+            __zshspy_log_async_end "$id" "$job" "$js"
+            __zshspy_forget_job "$job"
+          fi
         done
-      fi
 
-      (( __zshspy_jobs_pending )) || break
-    done
+        # Adopt a completed background job that did not exist in preexec's
+        # snapshot.  Foreground jobs have already been removed before queued CHLD
+        # traps run, so a done job reached here is a background job.
+        if [[ -n $__zshspy_cur_id ]] && (( __zshspy_jobs_before_valid )); then
+          for job in "${(@k)jobstates}"; do
+            (( ${+__zshspy_job_cmd_id[$job]} )) && continue
+            js="${jobstates[$job]}"
+            [[ ${js%%:*} == done ]] || continue
+            __zshspy_job_pids_csv "$js"
+            cur_pids="$__zshspy_r"
+            if [[ -n ${__zshspy_jobs_before_pids[$job]+x} &&
+                  $cur_pids == "${__zshspy_jobs_before_pids[$job]}" ]]; then
+              continue
+            fi
+            if (( ${+__zshspy_job_logged_done[$job]} )) &&
+               [[ ${__zshspy_job_logged_done[$job]} == "$cur_pids" ]]; then
+              continue
+            fi
 
-    __zshspy_jobs_unlock
+            id="$__zshspy_cur_id"
+            __zshspy_job_cmd_id[$job]="$id"
+            __zshspy_job_start_s[$job]="${__zshspy_cmd_start_s[$id]-}"
+            __zshspy_job_start_ns[$job]="${__zshspy_cmd_start_ns[$id]-}"
+            __zshspy_job_pids[$job]="$cur_pids"
+            __zshspy_log_async_start "$id" "$job" "$js"
+            __zshspy_job_logged_done[$job]="$cur_pids"
+            __zshspy_cur_adopted+=( "$job" )
+            __zshspy_log_async_end "$id" "$job" "$js"
+            __zshspy_forget_job "$job"
+          done
+        fi
+
+        (( __zshspy_jobs_pending )) || break
+      done
+
+    } always {
+      (( __zshspy_jobs_locked )) && __zshspy_jobs_unlock
+    }
     return 0
   }
 
@@ -788,7 +802,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     (( __zshspy_seq++ ))
     local id="${__zshspy_session_id}.${__zshspy_seq}"
     local typed="$1" short="$2" expanded="$3"
-    local -i jobs_locked=0
+    local -i __zshspy_jobs_locked=0
     [[ -z $typed ]] && typed="$expanded"
 
     __zshspy_cur_id="$id"
@@ -798,9 +812,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_jobs_before_valid=0
     __zshspy_cur_adopted=()
 
-    if (( __zshspy_bg_enabled )); then
-      if __zshspy_jobs_lock; then
-        jobs_locked=1
+    {
+      if (( __zshspy_bg_enabled )) && __zshspy_jobs_lock; then
         local j
         for j in "${(@k)jobstates}"; do
           __zshspy_job_pids_csv "${jobstates[$j]}"
@@ -808,12 +821,12 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
         done
         __zshspy_jobs_before_valid=1
       fi
-    fi
-
-    # Keep the semantic lock through command_start so a very fast child cannot
-    # produce async_start before its owning command_start record.
-    __zshspy_log_command_start "$id" "$typed" "$expanded" "$short"
-    (( jobs_locked )) && __zshspy_jobs_unlock
+      # Keep the semantic lock through command_start so a very fast child
+      # cannot produce async_start before its owning command_start record.
+      __zshspy_log_command_start "$id" "$typed" "$expanded" "$short"
+    } always {
+      (( __zshspy_jobs_locked )) && __zshspy_jobs_unlock
+    }
     return 0
   }
 
@@ -834,68 +847,70 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local id="$__zshspy_cur_id"
     [[ -n $id ]] || return $last_status
 
-    local -i jobs_locked=0
+    local -i __zshspy_jobs_locked=0
     local -a new_jobs items
     local j current_pids before_pids js async_jobs_json
     new_jobs=()
     items=()
 
-    if (( __zshspy_jobs_before_valid &&
-          ((__zshspy_bg_enabled && ! __zshspy_finalizing) || final_job_pass) )); then
-      if __zshspy_jobs_lock; then
-        jobs_locked=1
-        for j in "${(@k)jobstates}"; do
-          (( ${+__zshspy_job_cmd_id[$j]} )) && continue
-          __zshspy_job_pids_csv "${jobstates[$j]}"
-          current_pids="$__zshspy_r"
-          before_pids="${__zshspy_jobs_before_pids[$j]-}"
-          if (( ${+__zshspy_job_logged_done[$j]} )) &&
-             [[ ${__zshspy_job_logged_done[$j]} == "$current_pids" ]]; then
-            continue
-          fi
-          if (( ! ${+__zshspy_jobs_before_pids[$j]} )) ||
-             [[ $current_pids != "$before_pids" ]]; then
-            new_jobs+=( "$j" )
-          fi
-        done
+    {
+      if (( __zshspy_jobs_before_valid &&
+            ((__zshspy_bg_enabled && ! __zshspy_finalizing) || final_job_pass) )); then
+        if __zshspy_jobs_lock; then
+          for j in "${(@k)jobstates}"; do
+            (( ${+__zshspy_job_cmd_id[$j]} )) && continue
+            __zshspy_job_pids_csv "${jobstates[$j]}"
+            current_pids="$__zshspy_r"
+            before_pids="${__zshspy_jobs_before_pids[$j]-}"
+            if (( ${+__zshspy_job_logged_done[$j]} )) &&
+               [[ ${__zshspy_job_logged_done[$j]} == "$current_pids" ]]; then
+              continue
+            fi
+            if (( ! ${+__zshspy_jobs_before_pids[$j]} )) ||
+               [[ $current_pids != "$before_pids" ]]; then
+              new_jobs+=( "$j" )
+            fi
+          done
 
-        for j in "${new_jobs[@]}"; do
-          (( ${+jobstates[$j]} )) || continue
-          js="${jobstates[$j]}"
-          __zshspy_job_pids_csv "$js"
-          current_pids="$__zshspy_r"
-          if (( ${+__zshspy_job_logged_done[$j]} )) &&
-             [[ ${__zshspy_job_logged_done[$j]} == "$current_pids" ]]; then
-            continue
-          fi
-          __zshspy_job_cmd_id[$j]="$id"
-          __zshspy_job_start_s[$j]="${__zshspy_cmd_start_s[$id]-}"
-          __zshspy_job_start_ns[$j]="${__zshspy_cmd_start_ns[$id]-}"
-          __zshspy_job_pids[$j]="$current_pids"
-          __zshspy_log_async_start "$id" "$j" "$js"
-          case "$j" in
-            (""|*[!0-9]*)
-              __zshspy_json_string "$j"
-              items+=( "$__zshspy_r" )
-              ;;
-            (*)
-              items+=( "$j" )
-              ;;
-          esac
-        done
+          for j in "${new_jobs[@]}"; do
+            (( ${+jobstates[$j]} )) || continue
+            js="${jobstates[$j]}"
+            __zshspy_job_pids_csv "$js"
+            current_pids="$__zshspy_r"
+            if (( ${+__zshspy_job_logged_done[$j]} )) &&
+               [[ ${__zshspy_job_logged_done[$j]} == "$current_pids" ]]; then
+              continue
+            fi
+            __zshspy_job_cmd_id[$j]="$id"
+            __zshspy_job_start_s[$j]="${__zshspy_cmd_start_s[$id]-}"
+            __zshspy_job_start_ns[$j]="${__zshspy_cmd_start_ns[$id]-}"
+            __zshspy_job_pids[$j]="$current_pids"
+            __zshspy_log_async_start "$id" "$j" "$js"
+            case "$j" in
+              (""|*[!0-9]*)
+                __zshspy_json_string "$j"
+                items+=( "$__zshspy_r" )
+                ;;
+              (*)
+                items+=( "$j" )
+                ;;
+            esac
+          done
+        fi
       fi
-    fi
 
-    # Read the adopted list only now, under the lock: a trap could still
-    # adopt a job between an earlier copy and the lock acquisition.
-    items=( "${__zshspy_cur_adopted[@]}" "${items[@]}" )
-    async_jobs_json="[${(j:,:)items}]"
-    __zshspy_cur_id=""
-    __zshspy_jobs_before_valid=0
-    __zshspy_jobs_before_pids=()
-    __zshspy_log_command_end "$id" "$last_status" "$async_jobs_json" "$reason"
-    __zshspy_cur_adopted=()
-    (( jobs_locked )) && __zshspy_jobs_unlock
+      # Read the adopted list only now, under the lock: a trap could still
+      # adopt a job between an earlier copy and the lock acquisition.
+      items=( "${__zshspy_cur_adopted[@]}" "${items[@]}" )
+      async_jobs_json="[${(j:,:)items}]"
+      __zshspy_cur_id=""
+      __zshspy_jobs_before_valid=0
+      __zshspy_jobs_before_pids=()
+      __zshspy_log_command_end "$id" "$last_status" "$async_jobs_json" "$reason"
+      __zshspy_cur_adopted=()
+    } always {
+      (( __zshspy_jobs_locked )) && __zshspy_jobs_unlock
+    }
     return $last_status
   }
 
@@ -944,61 +959,66 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     # nested zshexit/re-source then sees finalizing=1 and cannot duplicate the
     # command/job/session tail.  Keep one explicit discovery pass for the
     # in-flight command, using the preexec snapshot while the wrapper is inert.
-    (( __zshspy_bg_enabled )) && final_job_pass=1
-    __zshspy_finalizing=1
-    __zshspy_bg_enabled=0
-    __zshspy_jobs_pending=0
-    __zshspy_finish_current_command "$final_status" "$reason" "$final_job_pass"
+    {
+      (( __zshspy_bg_enabled )) && final_job_pass=1
+      __zshspy_finalizing=1
+      __zshspy_bg_enabled=0
+      __zshspy_jobs_pending=0
+      __zshspy_finish_current_command "$final_status" "$reason" "$final_job_pass"
 
-    # No archive CHLD handler can enter from this point.  Keep the semantic lock
-    # closed through session_end so a nested direct reconciliation call also
-    # cannot start work that would outlive the archive lifecycle.
-    __zshspy_jobs_busy=1
+      # No archive CHLD handler can enter from this point.  Keep the semantic lock
+      # closed through session_end so a nested direct reconciliation call also
+      # cannot start work that would outlive the archive lifecycle.
+      __zshspy_jobs_busy=1
 
-    local job id js job_state cur_pids expected_pids lost_reason
-    if [[ $reason == archive_reloaded ]]; then
-      lost_reason="archive_reloaded_while_running"
-    else
-      lost_reason="shell_exit_while_running"
-    fi
-
-    for job in "${(@k)__zshspy_job_cmd_id}"; do
-      id="${__zshspy_job_cmd_id[$job]}"
-      if (( ! ${+jobstates[$job]} )); then
-        __zshspy_log_async_lost "$id" "$job" "missing_from_job_table"
-        __zshspy_forget_job "$job"
-        continue
-      fi
-
-      js="${jobstates[$job]}"
-      __zshspy_job_pids_csv "$js"
-      cur_pids="$__zshspy_r"
-      expected_pids="${__zshspy_job_pids[$job]-}"
-      if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
-        __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
+      local job id js job_state cur_pids expected_pids lost_reason
+      if [[ $reason == archive_reloaded ]]; then
+        lost_reason="archive_reloaded_while_running"
       else
-        job_state="${js%%:*}"
-        if [[ $job_state == done ]]; then
-          __zshspy_job_logged_done[$job]="$cur_pids"
-          __zshspy_log_async_end "$id" "$job" "$js"
-        else
-          __zshspy_log_async_lost "$id" "$job" "$lost_reason"
-        fi
+        lost_reason="shell_exit_while_running"
       fi
-      __zshspy_forget_job "$job"
-    done
 
-    __zshspy_log_session_end "$final_status" "$reason"
+      for job in "${(@k)__zshspy_job_cmd_id}"; do
+        id="${__zshspy_job_cmd_id[$job]}"
+        if (( ! ${+jobstates[$job]} )); then
+          __zshspy_log_async_lost "$id" "$job" "missing_from_job_table"
+          __zshspy_forget_job "$job"
+          continue
+        fi
 
-    # A nested finalizer can run while another writer owns the flag (for
-    # example, a chained user CHLD trap may call exit).  In that case the tail
-    # record is queued rather than written directly.  Archive-side CHLD work is
-    # frozen above, so it is now safe to force the complete queue to disk before
-    # disabling the writer and closing the descriptor.
-    __zshspy_drain_queue
-    __zshspy_writing=0
-    __zshspy_enabled=0
-    __zshspy_close_fd
+        js="${jobstates[$job]}"
+        __zshspy_job_pids_csv "$js"
+        cur_pids="$__zshspy_r"
+        expected_pids="${__zshspy_job_pids[$job]-}"
+        if (( ${+__zshspy_job_pids[$job]} )) && [[ $cur_pids != "$expected_pids" ]]; then
+          __zshspy_log_async_lost "$id" "$job" "job_slot_reused"
+        else
+          job_state="${js%%:*}"
+          if [[ $job_state == done ]]; then
+            __zshspy_job_logged_done[$job]="$cur_pids"
+            __zshspy_log_async_end "$id" "$job" "$js"
+          else
+            __zshspy_log_async_lost "$id" "$job" "$lost_reason"
+          fi
+        fi
+        __zshspy_forget_job "$job"
+      done
+
+      __zshspy_log_session_end "$final_status" "$reason"
+
+      # A nested finalizer can run while another writer owns the flag (for
+      # example, a chained user CHLD trap may call exit).  In that case the tail
+      # record is queued rather than written directly.  Archive-side CHLD work is
+      # frozen above, so it is now safe to force the complete queue to disk before
+      # disabling the writer and closing the descriptor.
+      __zshspy_drain_queue
+    } always {
+      # Reached on an interrupt too: a partly finalized instance ends here
+      # rather than carrying on with its guards half set.
+      __zshspy_writing=0
+      __zshspy_enabled=0
+      __zshspy_close_fd
+    }
     return $final_status
   }
 
@@ -1158,13 +1178,15 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_file="${__zshspy_dir}/hist.${__zshspy_session_id}.jsonl"
 
     typeset __zshspy_old_umask="$(umask)"
-    umask 077
-    [[ -d $__zshspy_dir ]] || command mkdir -p -- "$__zshspy_dir" 2>/dev/null || true
-
-    if [[ -d $__zshspy_dir ]]; then
-      __zshspy_open_file "$__zshspy_file" || __zshspy_fd=-1
-    fi
-    umask "$__zshspy_old_umask"
+    {
+      umask 077
+      [[ -d $__zshspy_dir ]] || command mkdir -p -- "$__zshspy_dir" 2>/dev/null || true
+      if [[ -d $__zshspy_dir ]]; then
+        __zshspy_open_file "$__zshspy_file" || __zshspy_fd=-1
+      fi
+    } always {
+      umask "$__zshspy_old_umask"
+    }
 
     if (( __zshspy_fd >= 0 )); then
       __zshspy_enabled=1
