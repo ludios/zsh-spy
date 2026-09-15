@@ -839,7 +839,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local -a new_jobs items
     local j current_pids before_pids js async_jobs_json
     new_jobs=()
-    items=( "${__zshspy_cur_adopted[@]}" )
+    items=()
 
     if (( __zshspy_jobs_before_valid &&
           ((__zshspy_bg_enabled && ! __zshspy_finalizing) || final_job_pass) )); then
@@ -887,6 +887,9 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       fi
     fi
 
+    # Read the adopted list only now, under the lock: a trap could still
+    # adopt a job between an earlier copy and the lock acquisition.
+    items=( "${__zshspy_cur_adopted[@]}" "${items[@]}" )
     async_jobs_json="[${(j:,:)items}]"
     __zshspy_cur_id=""
     __zshspy_jobs_before_valid=0

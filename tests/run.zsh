@@ -544,6 +544,26 @@ test_stderr_visible() {
   zsh_spy_check $? "t18: stderr still reaches the terminal after a re-source"
 }
 
+# T19: command_end.async_jobs must be assembled under the jobs lock.  A
+# CHLD trap that adopts a job between the old early copy of the adopted
+# list and the lock acquisition used to leave the job out of async_jobs
+# while its async_start/async_end records were correct.  The wrapped lock
+# helper busy-waits before locking on precmd's second call, i.e. during
+# the command line that spawns the job.
+test_async_jobs_under_lock() {
+  print -r -- "T19 async_jobs assembled under the lock"
+  local file ce
+  zsh_spy_session t19 SOURCE \
+    'functions -c __zshspy_jobs_lock __orig_lock; typeset -gi __n=0; __zshspy_jobs_lock() { if [[ $funcstack[2] == __zshspy_finish_current_command ]] && (( ++__n == 2 )); then repeat 2000000; do :; done; fi; __orig_lock "$@" }' \
+    'sleep 0.4 & sleep 0.1' \
+    'sleep 0.5'
+  file="$REPLY"
+  zsh_spy_count_records "$file" async_start
+  zsh_spy_check $(( REPLY != 1 )) "t19: exactly one async_start, got $REPLY"
+  zsh_spy_first_record "$file" command_end '"async_jobs":[1]'
+  zsh_spy_check $? "t19: command_end lists the job adopted before the lock was taken"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -577,6 +597,7 @@ main() {
     test_hook_chain_status
     test_reload_with_active_job
     test_stderr_visible
+    test_async_jobs_under_lock
   )
   (( $# )) && tests=( "$@" )
   local t
