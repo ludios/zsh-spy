@@ -10,7 +10,7 @@
 # anywhere:
 #
 #   zsh tests/run.zsh                      # every test
-#   zsh tests/run.zsh test_basic test_hup  # only the named test functions
+#   zsh tests/run.zsh test_basic test_adoption  # only the named tests
 #
 # Exit status 0 iff every check passed.  Requires the zsh/zpty module (it is
 # a stock zsh module; the suite skips with status 0 if it cannot be loaded,
@@ -793,8 +793,8 @@ main() {
     exit 2
   fi
   ZSH_SPY_WORK="$(mktemp -d)"
-  local -a tests
-  tests=(
+  local -a all_tests
+  all_tests=(
     test_basic
     test_histcmd
     test_list_trap_conflict
@@ -822,7 +822,19 @@ main() {
     test_status_decoding
     test_many_jobs
   )
-  (( $# )) && tests=( "$@" )
+  local -a tests
+  if (( $# )); then
+    local sel
+    for sel in "$@"; do
+      if (( ! ${all_tests[(Ie)$sel]} )); then
+        print -u2 -r -- "ERROR: unknown test '$sel'"
+        return 2
+      fi
+    done
+    tests=( "$@" )
+  else
+    tests=( "${all_tests[@]}" )
+  fi
   local t
   for t in "${tests[@]}"; do "$t"; done
   print -r -- "----"
