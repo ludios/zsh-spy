@@ -4,6 +4,7 @@
 # Model-output: ChatGPT 5.5 Pro
 # Model-output: ChatGPT 5.6 Sol (Pro)
 # Model-output: Claude Fable 5
+# Model-output: Claude Fable 5.1
 
 # zsh JSONL history archive
 # Install: source this near the end of ~/.zshrc.
@@ -1149,8 +1150,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_dir="${ZSH_SPY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh-spy}"
     __zshspy_file="${__zshspy_dir}/hist.${__zshspy_session_id}.jsonl"
 
-    typeset __zshspy_old_umask
-    __zshspy_old_umask="$(umask)"
+    typeset __zshspy_old_umask="$(umask)"
     umask 077
     [[ -d $__zshspy_dir ]] || command mkdir -p -- "$__zshspy_dir" 2>/dev/null || true
 

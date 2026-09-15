@@ -1,5 +1,7 @@
 #!/usr/bin/env zsh
 
+# Model-output: Claude Fable 5.1
+
 # Test suite for zsh-spy.zsh.
 #
 # Each test drives a real interactive zsh over a pty (zsh/zpty), sources the
@@ -7,7 +9,8 @@
 # session leaves behind plus on side effects inside the session.  Run from
 # anywhere:
 #
-#   zsh tests/run.zsh
+#   zsh tests/run.zsh                      # every test
+#   zsh tests/run.zsh test_basic test_hup  # only the named test functions
 #
 # Exit status 0 iff every check passed.  Requires the zsh/zpty module (it is
 # a stock zsh module; the suite skips with status 0 if it cannot be loaded,
@@ -405,6 +408,10 @@ test_reload_lifecycle() {
   done
   (( valid && reload_count == 1 && exit_count == 1 ))
   zsh_spy_check $? "t11: both files are complete; reload/zshexit reasons are unique"
+  # A bare `typeset name` of an existing parameter prints it, so the
+  # re-source used to echo `__zshspy_old_umask=022` at the user.
+  [[ $ZSH_SPY_SESSION_OUT != *__zshspy_*=* ]]
+  zsh_spy_check $? "t11: re-source prints no archive parameter dump"
   if (( ${#files[@]} )); then
     grep -q 'before-reload' "${files[@]}" && grep -q 'after-reload' "${files[@]}"
     zsh_spy_check $? "t11: commands on both sides of the reload were captured"
@@ -537,7 +544,9 @@ test_stderr_visible() {
   zsh_spy_check $? "t18: stderr still reaches the terminal after a re-source"
 }
 
-# Entry point: run every test against a scratch dir and report a summary.
+# Entry point: run the named tests, or every test, against a scratch dir and
+# report a summary.
+#   $@: test function names to run; empty means all of them.
 main() {
   if ! zmodload zsh/zpty 2>/dev/null; then
     print -r -- "SKIP: zsh/zpty unavailable; cannot drive a pty session"
@@ -548,24 +557,30 @@ main() {
     exit 2
   fi
   ZSH_SPY_WORK="$(mktemp -d)"
-  test_basic
-  test_histcmd
-  test_list_trap_conflict
-  test_function_trap_chain
-  test_adoption
-  test_signal_status
-  test_exit_status
-  test_cross_prompt
-  test_reply_preserved
-  test_session_end_stress
-  test_reload_lifecycle
-  test_trap_status_across_reload
-  test_removed_trap_not_resurrected
-  test_trap_body_substring
-  test_queued_finalizer
-  test_hook_chain_status
-  test_reload_with_active_job
-  test_stderr_visible
+  local -a tests
+  tests=(
+    test_basic
+    test_histcmd
+    test_list_trap_conflict
+    test_function_trap_chain
+    test_adoption
+    test_signal_status
+    test_exit_status
+    test_cross_prompt
+    test_reply_preserved
+    test_session_end_stress
+    test_reload_lifecycle
+    test_trap_status_across_reload
+    test_removed_trap_not_resurrected
+    test_trap_body_substring
+    test_queued_finalizer
+    test_hook_chain_status
+    test_reload_with_active_job
+    test_stderr_visible
+  )
+  (( $# )) && tests=( "$@" )
+  local t
+  for t in "${tests[@]}"; do "$t"; done
   print -r -- "----"
   print -r -- "checks: $ZSH_SPY_CHECKS  failures: $ZSH_SPY_FAILS"
   if (( ZSH_SPY_FAILS != 0 )); then
