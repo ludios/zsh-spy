@@ -49,15 +49,40 @@
 # present when this file is sourced, background completion tracking is disabled
 # rather than clobbering that trap. Function-form TRAPCHLD is chained.
 #
-# XXX: the JSON escaping covers the C0 controls, but NUL and bytes that are
-# not valid UTF-8 pass through verbatim (zsh strings are 8-bit clean), so a
-# command line containing such bytes yields a record that strict JSON
-# parsers reject. Recovering consumers should skip unparseable lines.
+# XXX: the JSON escaping covers NUL and the other C0 controls, but bytes that
+# are not valid UTF-8 pass through verbatim (zsh strings are 8-bit clean), so a
+# command line containing such bytes yields a record that strict JSON parsers
+# reject. Recovering consumers should skip unparseable lines.
 #
 # XXX: without zsh/system there is no sysopen, and the plain-redirection
 # fallback cannot set close-on-exec, so every child process inherits the
 # archive fd. Records written by traps may also appear later in the file
 # than records with earlier timestamps; order by epoch_s/epoch_ns.
+#
+# Known limitations, none of which corrupt the file:
+# - A background job brought back with `fg`, or detached with `disown`,
+#   completes without firing the CHLD trap, so it is recorded as async_lost
+#   ("missing_from_job_table"), not async_end.
+# - async_end.duration_s/ns is measured from the start of the command line
+#   that spawned the job, not from the `&`; "sleep 5; sleep 1 &" reports about
+#   five seconds for the one-second job.
+# - `exec <program>` replaces the shell without running zshexit, so that
+#   command gets no command_end and the session gets no session_end. A closed
+#   terminal or a fatal signal still does (via zshexit).
+# - zsh runs the CHLD trap for every job except the one it is waiting on, so a
+#   foreground job that finishes at almost the same instant as a background
+#   one, or a foreground pipeline whose in-shell tail runs an external command
+#   that has released the terminal, can be misattributed as a background job.
+#   The common cases (a foreground pipeline whose head owns the terminal) are
+#   filtered out; this residual race is not.
+# - A user CHLD trap that runs `jobs` (or `wait <pid>`) can delete a completed
+#   background job from zsh's table before the archive reconciles it, turning
+#   that job's async_end into async_lost.
+# - Sourcing this file from inside a function that used `emulate -L zsh`
+#   (LOCAL_OPTIONS/LOCAL_TRAPS) discards the TRAPCHLD, NO_NOTIFY and
+#   EXTENDED_HISTORY it sets as the function returns; source it at top level.
+# - Background jobs launched by other precmd/preexec hooks are attributed to a
+#   neighbouring command or missed, depending on hook order.
 
 if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   setopt EXTENDED_HISTORY
@@ -211,7 +236,10 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   # existing entry.  Session names are designed to be unique; a collision is
   # therefore safer to reject than to merge two lifecycles or follow a
   # pre-created symlink.  The shell-redirection fallback cannot set close-on-
-  # exec, but NO_CLOBBER still gives it exclusive-create semantics.
+  # exec, and NO_CLOBBER only refuses an existing *regular* file, so on that
+  # path a pre-planted symlink, FIFO or device at the archive name would still
+  # be opened; the unpredictable session id in a 0700 directory is what keeps
+  # that out of reach, not the opener.
   #   $1: archive path to create.
   # Returns 0 with __zshspy_fd open, 1 on failure.
   __zshspy_open_file() {
