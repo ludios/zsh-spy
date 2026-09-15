@@ -681,15 +681,14 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   # The CHLD trap is therefore the only place such a job is still visible in
   # $jobstates; attribute it to $__zshspy_cur_id and emit its complete
   # async_start/async_end lifecycle while the semantic lock is held.
-  # No arguments; preserves $? for the surrounding hook/trap machinery.
+  # No arguments.  Returns 0; callers capture $? before calling.
   __zshspy_process_done_jobs() {
-    local _save_status=$?
     emulate -L zsh
     local __zshspy_r __zshspy_r2
     (( __zshspy_enabled && __zshspy_bg_enabled &&
-       ! __zshspy_finalizing && ${ZSH_SUBSHELL:-0} == 0 )) || return $_save_status
+       ! __zshspy_finalizing && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
 
-    __zshspy_jobs_lock || return $_save_status
+    __zshspy_jobs_lock || return 0
 
     local job id js job_state cur_pids expected_pids
     while true; do
@@ -774,7 +773,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     done
 
     __zshspy_jobs_unlock
-    return $_save_status
+    return 0
   }
 
   __zshspy_preexec() {
@@ -1072,20 +1071,25 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     return "$1"
   }
 
+  # CHLD entry point.  Deliberately not under `emulate -L`: the chained user
+  # trap must run under the user's own options, and any setopt or trap it
+  # makes must outlive this call, which LOCAL_OPTIONS/LOCAL_TRAPS would undo.
+  #   $@: the arguments zsh passes to TRAPCHLD.
+  # Returns the user trap's status (nonzero tells zsh the signal was not
+  # handled and interrupts the surrounding execution), or 0 when this
+  # wrapper alone handled CHLD.
   __zshspy_trap_chld() {
     local _save_status=$?
-    emulate -L zsh
-    local -i trap_status=0
     (( ${ZSH_SUBSHELL:-0} == 0 && ! __zshspy_finalizing )) && __zshspy_process_done_jobs
-    if (( __zshspy_chained_user_chld && ${+functions[__zshspy_user_TRAPCHLD]} )); then
-      __zshspy_restore_status "$_save_status"
+    (( __zshspy_chained_user_chld && ${+functions[__zshspy_user_TRAPCHLD]} )) || return 0
+    # The status handed to the user trap is often nonzero.  Raising it as a
+    # condition keeps ERR_RETURN/ERR_EXIT from firing on it; both branches
+    # then call the trap, which sees that status as $?.
+    if __zshspy_restore_status "$_save_status"; then
       __zshspy_user_TRAPCHLD "$@"
-      trap_status=$?
+    else
+      __zshspy_user_TRAPCHLD "$@"
     fi
-    # A nonzero function-trap return tells zsh the signal was not handled and
-    # interrupts the surrounding execution.  Preserve the chained trap's own
-    # signal semantics; when there was no user trap, this wrapper handled CHLD.
-    return $trap_status
   }
 
   # Report whether a list-form CHLD trap (set with `trap '...' CHLD`) exists

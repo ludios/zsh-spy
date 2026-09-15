@@ -589,6 +589,26 @@ test_user_trap_reply_clobber() {
   zsh_spy_check $? "t20: the user trap's REPLY assignment reaches the user's shell"
 }
 
+# T21: the chained user TRAPCHLD must run as the user wrote it.  The
+# wrapper used to call it under `emulate -L zsh`, whose LOCAL_OPTIONS and
+# LOCAL_TRAPS undid any setopt or trap the user trap made.  Without the
+# emulation the deliberately nonzero status handed to the user trap must
+# not trip ERR_RETURN before the trap is called.
+test_user_trap_isolation() {
+  print -r -- "T21 user trap runs under the user's options"
+  zsh_spy_session t21 \
+    'TRAPCHLD() { setopt noclobber; TRAPUSR1() { :; } }' SOURCE \
+    'sleep 0.2 &' 'sleep 0.5' \
+    'print -r -- "clobber=$options[clobber] usr1=${+functions[TRAPUSR1]}" > "$ZSH_SPY_DIR/opts.txt"'
+  grep -qx 'clobber=off usr1=1' "$ZSH_SPY_WORK/t21/opts.txt"
+  zsh_spy_check $? "t21: setopt and trap made by the user trap persist"
+  zsh_spy_session t21b \
+    'setopt errreturn; TRAPCHLD() { print -r -- "user:$?" >> "$ZSH_SPY_DIR/chld.txt" }' SOURCE \
+    'sleep 0.3 & false; sleep 0.6'
+  grep -qx 'user:1' "$ZSH_SPY_WORK/t21b/chld.txt"
+  zsh_spy_check $? "t21: user trap still called with the interrupted status under ERR_RETURN"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -624,6 +644,7 @@ main() {
     test_stderr_visible
     test_async_jobs_under_lock
     test_user_trap_reply_clobber
+    test_user_trap_isolation
   )
   (( $# )) && tests=( "$@" )
   local t
