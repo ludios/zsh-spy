@@ -218,9 +218,11 @@ test_basic() {
   [[ $last == *'"type":"session_end"'* ]]
   zsh_spy_check $? "t1: last record is session_end"
   zsh_spy_first_record "$file" command_start 'hello-archive'; cs="$REPLY"
+  [[ -n $cs ]]
   zsh_spy_check $? "t1: command_start recorded for the echo"
   zsh_spy_field "$cs" id; cs_id="$REPLY"
   zsh_spy_first_record "$file" command_end "\"id\":\"$cs_id\""; ce="$REPLY"
+  [[ -n $ce ]]
   zsh_spy_check $? "t1: command_end with the matching id"
   zsh_spy_field "$ce" status
   zsh_spy_check $(( REPLY != 0 )) "t1: command_end status is 0"
@@ -295,6 +297,7 @@ test_adoption() {
   zsh_spy_first_record "$file" async_start "\"id\":\"$cs_id\""
   zsh_spy_check $? "t5: async_start attributed to the spawning command"
   zsh_spy_first_record "$file" async_end "\"id\":\"$cs_id\""; ae="$REPLY"
+  [[ -n $ae ]]
   zsh_spy_check $? "t5: async_end attributed to the spawning command"
   zsh_spy_field "$ae" status
   zsh_spy_check $(( REPLY != 0 )) "t5: async_end status is 0"
@@ -314,6 +317,7 @@ test_signal_status() {
   zsh_spy_session t6 SOURCE 'sleep 5 &' 'kill %1' 'sleep 0.5'
   file="$REPLY"
   zsh_spy_first_record "$file" async_end; ae="$REPLY"
+  [[ -n $ae ]]
   zsh_spy_check $? "t6: async_end recorded for the killed job"
   [[ $ae == *'"status":143'* && $ae == *'"status_kind":"signaled"'* ]]
   zsh_spy_check $? "t6: SIGTERM decodes to status 143 / kind signaled"
@@ -327,6 +331,7 @@ test_exit_status() {
   zsh_spy_session t7 SOURCE 'zsh -c "exit 3" &' 'sleep 0.5'
   file="$REPLY"
   zsh_spy_first_record "$file" async_end; ae="$REPLY"
+  [[ -n $ae ]]
   zsh_spy_check $? "t7: async_end recorded"
   [[ $ae == *'"status":3'* && $ae == *'"status_kind":"exit"'* ]]
   zsh_spy_check $? "t7: exit 3 reported as status 3 / kind exit"
