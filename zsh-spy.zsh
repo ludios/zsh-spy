@@ -38,11 +38,15 @@
 # or null with status_kind "unknown" when it cannot be determined.
 #
 # Hidden lines: with HIST_IGNORE_SPACE set, a line that zsh drops from
-# history (the typed line, or the line after alias expansion, starts with a
-# space) is still archived for its timing, status and jobs, but with
-# hist_hidden true and its command text, and the job_text of the jobs it
-# spawns, replaced by null.  zsh also drops a line whose leading-space alias
-# sits in a later command position; that case is archived verbatim.
+# history (the typed line starts with a space, or a regular alias whose
+# text starts with a space was expanded) is still archived for its timing,
+# status and jobs, but with hist_hidden true and its command text, and the
+# job_text of the jobs it spawns, replaced by null.  The alias check
+# consults $aliases for every word of the typed line, because the expanded
+# line zsh hands preexec has that space normalized away; so a leading-space
+# alias named outside command position hides the line here but not in
+# zsh, and one reached only through another alias hides it in zsh but not
+# here.
 #
 # Schema 2 (2026-09-16): command text may be null, command_end gained
 # pipestatus, session_start gained the provenance fields.
@@ -920,11 +924,23 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local -i __zshspy_jobs_locked=0 hist_hidden=0
     [[ -z $typed ]] && typed="$expanded"
     # zsh drops this line from history when HIST_IGNORE_SPACE is set and
-    # the typed line, or the line after alias expansion, starts with a
-    # space (hist.c should_ignore_line).  emulate -L without -R leaves that
-    # option as the user set it.
-    if [[ -o histignorespace ]] && [[ $typed == ' '* || $expanded == ' '* ]]; then
-      hist_hidden=1
+    # the typed line starts with a space, or a regular alias whose text
+    # starts with a space was expanded (hist.c should_ignore_line).  The
+    # expanded line in $3 has lost that space, so look the typed words up
+    # in $aliases instead (see the header for the two mismatches).  emulate
+    # -L without -R leaves the option as the user set it.
+    if [[ -o histignorespace ]]; then
+      if [[ $typed == ' '* ]]; then
+        hist_hidden=1
+      elif (( ${+aliases} )); then
+        local w
+        for w in ${(z)typed}; do
+          if [[ ${aliases[$w]-} == ' '* ]]; then
+            hist_hidden=1
+            break
+          fi
+        done
+      fi
     fi
 
     __zshspy_cur_id="$id"
@@ -1040,9 +1056,11 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   }
 
   # precmd entry point.  $? and $pipestatus must both be read in this one
-  # statement: the `local` is itself a pipeline and resets them.
+  # statement: the `local` is itself a pipeline and resets them.  It runs
+  # under the user's options, where KSH_ARRAYS would make a bare $pipestatus
+  # expand to its first element only; [*] names the whole array either way.
   __zshspy_precmd() {
-    local last_status=$? last_pipestatus="${(j:,:)pipestatus}"
+    local last_status=$? last_pipestatus="${(j:,:)pipestatus[*]}"
     emulate -L zsh
     local __zshspy_r __zshspy_r2
     (( __zshspy_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return 0

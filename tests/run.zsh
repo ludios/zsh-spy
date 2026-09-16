@@ -825,6 +825,11 @@ test_pipestatus() {
   zsh_spy_first_record "$file" command_end '"reason":"zshexit"'; ce="$REPLY"
   [[ -n $ce && $ce == *'"pipestatus":null'* ]]
   zsh_spy_check $? "t28: zshexit command_end has pipestatus null"
+
+  zsh_spy_session t28b SOURCE 'setopt ksharrays' '(exit 5) | (exit 7) | true'
+  file="$REPLY"
+  zsh_spy_first_record "$file" command_end '"status":0,"pipestatus":[5,7,0]'
+  zsh_spy_check $? "t28: KSH_ARRAYS still yields the whole pipestatus array"
 }
 
 # T29: session_start provenance matches what the session itself sees, and
@@ -894,6 +899,17 @@ test_hist_hidden() {
   zsh_spy_first_record "$file" command_start 'spaced-t30-kept'; cs="$REPLY"
   [[ -n $cs && $cs == *'"hist_hidden":false'* ]]
   zsh_spy_check $? "t30: without HIST_IGNORE_SPACE a space-prefixed line is archived verbatim"
+
+  zsh_spy_session t30c SOURCE 'setopt histignorespace' "alias secret=' echo'" \
+    'secret t30c-first-secret' 'true; secret t30c-later-secret' 'echo t30c-plain'
+  file="$REPLY"
+  ! grep -q 't30c-first-secret\|t30c-later-secret' "$file"
+  zsh_spy_check $? "t30: lines expanding a leading-space alias leave no text in the archive"
+  zsh_spy_count_records "$file" command_start '"hist_hidden":true'
+  zsh_spy_check $(( REPLY != 2 )) "t30: both alias lines are hidden (got $REPLY)"
+  zsh_spy_first_record "$file" command_start 't30c-plain'; cs="$REPLY"
+  [[ -n $cs && $cs == *'"hist_hidden":false'* ]]
+  zsh_spy_check $? "t30: a line without the alias is archived verbatim"
 }
 
 # Entry point: run the named tests, or every test, against a scratch dir and
