@@ -780,6 +780,31 @@ test_many_jobs() {
   zsh_spy_check $(( starts < 28 )) "t26: the vast majority of 30 jobs were captured, got $starts"
 }
 
+# T27: session_start identifies its writers.  zsh_version is the running
+# shell's $ZSH_VERSION, and zsh_spy_version is the literal the archive source
+# declares, read from the source text rather than from the session so a
+# mangled declaration cannot be echoed back as a match.  (An integer typeset
+# of "2026.09.16" is a math error that aborts the entire source.)
+test_session_start_versions() {
+  print -r -- "T27 session_start version fields"
+  local file ss got want
+  zsh_spy_session t27 SOURCE \
+    'print -r -- "$ZSH_VERSION" > "$ZSH_SPY_DIR/zsh_version.txt"'
+  file="$REPLY"
+  zsh_spy_first_record "$file" session_start; ss="$REPLY"
+  [[ -n $ss ]]
+  zsh_spy_check $? "t27: session_start recorded"
+  zsh_spy_field "$ss" zsh_version; got="$REPLY"
+  want="$(<"$ZSH_SPY_WORK/t27/zsh_version.txt")"
+  [[ -n $want && $got == "$want" ]]
+  zsh_spy_check $? "t27: zsh_version is the session's ZSH_VERSION (got '$got', want '$want')"
+  zsh_spy_field "$ss" zsh_spy_version; got="$REPLY"
+  want=""
+  [[ "$(<"$ZSH_SPY_SRC")" =~ 'typeset -g[[:alpha:]]* +__zshspy_version="([^"]*)"' ]] && want="${match[1]}"
+  [[ -n $want && $got == "$want" ]]
+  zsh_spy_check $? "t27: zsh_spy_version is the declared version (got '$got', want '$want')"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -821,6 +846,7 @@ main() {
     test_json_escape
     test_status_decoding
     test_many_jobs
+    test_session_start_versions
   )
   local -a tests
   if (( $# )); then

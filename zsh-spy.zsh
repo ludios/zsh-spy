@@ -106,6 +106,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   zmodload zsh/datetime 2>/dev/null || true
   zmodload zsh/system   2>/dev/null || true
 
+  typeset -g  __zshspy_version="2026.09.16"
+
   typeset -gi __zshspy_enabled=0
   typeset -gi __zshspy_have_syswrite=0
   typeset -gi __zshspy_have_datetime=0
@@ -570,7 +572,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     local bg_json notify_json
     (( __zshspy_bg_enabled )) && bg_json=true || bg_json=false
     (( __zshspy_notify_was_on )) && notify_json=true || notify_json=false
-    __zshspy_write "{\"type\":\"session_start\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"shell_pid\":$__zshspy_shell_pid,\"zsh_version\":$qzver,\"file\":$qfile,\"background_tracking\":$bg_json,\"notify_was_on\":$notify_json}"
+    __zshspy_write "{\"type\":\"session_start\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"shell_pid\":$__zshspy_shell_pid,\"zsh_version\":$qzver,\"zsh_spy_version\":\"$__zshspy_version\",\"file\":$qfile,\"background_tracking\":$bg_json,\"notify_was_on\":$notify_json}"
   }
 
   __zshspy_log_command_start() {
