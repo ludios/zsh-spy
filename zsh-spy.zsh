@@ -121,7 +121,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   zmodload zsh/datetime 2>/dev/null || true
   zmodload zsh/system   2>/dev/null || true
 
-  typeset -g  __zshspy_version="2026.09.16"
+  typeset -g  __zshspy_version="2026.09.16.1"
 
   typeset -gi __zshspy_enabled=0
   typeset -gi __zshspy_have_syswrite=0
