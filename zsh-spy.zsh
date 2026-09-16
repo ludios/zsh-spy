@@ -14,7 +14,10 @@
 #   ${ZSH_SPY_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/zsh-spy}/hist.<session>.jsonl
 #
 # Record types:
-#   session_start
+#   session_start       shell identity and provenance (parent process, TERM,
+#                       SSH/tmux/screen, SHLVL, login, euid, tty), plus
+#                       background_tracking and, when that is false,
+#                       background_tracking_off_reason
 #   command_start       before zsh executes the entered command line
 #   command_end         after zsh returns from evaluating the entered command line
 #   async_start         after zsh has registered a newly-created background job;
@@ -26,11 +29,23 @@
 #   async_lost          if a tracked background job disappears from zsh's job table
 #   session_end
 #
-# Status fields: command_end.status is $?.  async_end.status is the exit
-# code of the job's last process (both the raw-wait-status encoding of
-# zsh <= 5.9 and the plain-code encoding of later zsh are normalized), or
-# 128+signum with status_kind "signaled" for signal deaths, or null with
-# status_kind "unknown" when it cannot be determined.
+# Status fields: command_end.status is $?, and command_end.pipestatus is
+# $pipestatus, one exit code per pipeline stage (null on the zshexit and
+# archive_reloaded paths, where zsh has not updated it).  async_end.status
+# is the exit code of the job's last process (both the raw-wait-status
+# encoding of zsh <= 5.9 and the plain-code encoding of later zsh are
+# normalized), or 128+signum with status_kind "signaled" for signal deaths,
+# or null with status_kind "unknown" when it cannot be determined.
+#
+# Hidden lines: with HIST_IGNORE_SPACE set, a line that zsh drops from
+# history (the typed line, or the line after alias expansion, starts with a
+# space) is still archived for its timing, status and jobs, but with
+# hist_hidden true and its command text, and the job_text of the jobs it
+# spawns, replaced by null.  zsh also drops a line whose leading-space alias
+# sits in a later command position; that case is archived verbatim.
+#
+# Schema 2 (2026-09-16): command text may be null, command_end gained
+# pipestatus, session_start gained the provenance fields.
 #
 # Intentional design choices:
 # - JSON Lines, one object per line.
@@ -113,7 +128,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   typeset -gi __zshspy_have_datetime=0
   typeset -gi __zshspy_have_jobparams=0
   typeset -gi __zshspy_bg_enabled=0
-  typeset -gi __zshspy_chld_conflict=0
+  typeset -g  __zshspy_bg_off_reason=""
   typeset -gi __zshspy_chained_user_chld=0
   typeset -gi __zshspy_finalizing=0
   typeset -gi __zshspy_jobs_busy=0
@@ -152,10 +167,12 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   typeset -ga __zshspy_queue=()
   typeset -gA __zshspy_cmd_start_s=()
   typeset -gA __zshspy_cmd_start_ns=()
+  typeset -gA __zshspy_cmd_hidden=()
   typeset -gA __zshspy_job_cmd_id=()
   typeset -gA __zshspy_job_start_s=()
   typeset -gA __zshspy_job_start_ns=()
   typeset -gA __zshspy_job_pids=()
+  typeset -gA __zshspy_job_hidden=()
   typeset -gA __zshspy_jobs_before_pids=()
   typeset -gA __zshspy_job_logged_done=()
   typeset -ga __zshspy_cur_adopted=()
@@ -538,47 +555,81 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_r="[${(j:,:)items}]"
   }
 
+  # Job-table fields shared by async_start and async_end.  job_text is null
+  # for a job spawned by a hidden command line (see the header).
+  #   $1: zsh job-table slot, currently registered in the job maps.
+  #   $2: the job's $jobstates value.
+  # Sets __zshspy_r to the comma-separated JSON members.
   __zshspy_job_summary_fields() {
     emulate -L zsh
     local job="$1" js="$2"
     local -a parts
-    local job_state mark text dir pids qjob_state qmark qtext qdir processes_json
+    local job_state mark dir pids qjob_state qmark qtext qdir processes_json hidden_json
     parts=( "${(@s.:.)js}" )
     job_state="${parts[1]-}"
     mark="${parts[2]-}"
-    text="${jobtexts[$job]-}"
     dir="${jobdirs[$job]-}"
+    if (( ${__zshspy_job_hidden[$job]:-0} )); then
+      hidden_json=true
+      qtext=null
+    else
+      hidden_json=false
+      __zshspy_json_string "${jobtexts[$job]-}"; qtext="$__zshspy_r"
+    fi
     __zshspy_job_pids_csv "$js"; pids="$__zshspy_r"
     __zshspy_processes_json "$js"; processes_json="$__zshspy_r"
     __zshspy_json_string "$job_state"; qjob_state="$__zshspy_r"
     __zshspy_json_string "$mark"; qmark="$__zshspy_r"
-    __zshspy_json_string "$text"; qtext="$__zshspy_r"
     __zshspy_json_string "$dir"; qdir="$__zshspy_r"
-    __zshspy_r="\"job\":$job,\"job_state\":$qjob_state,\"job_mark\":$qmark,\"job_pids\":\"$pids\",\"job_text\":$qtext,\"job_dir\":$qdir,\"processes\":$processes_json"
+    __zshspy_r="\"job\":$job,\"job_state\":$qjob_state,\"job_mark\":$qmark,\"job_pids\":\"$pids\",\"job_text\":$qtext,\"job_dir\":$qdir,\"hist_hidden\":$hidden_json,\"processes\":$processes_json"
   }
 
+  # Emit session_start: identity, provenance (what launched this shell and
+  # where it is attached) and the archive's own configuration.  Environment
+  # strings are "" when unset; parent_comm is "" without Linux /proc.
   __zshspy_log_session_start() {
     emulate -L zsh
     local __zshspy_r __zshspy_r2
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
-    local qsession qts qhost quser qfile qzver
+    local qsession qts qhost quser qfile qzver qtty qpcomm qterm qtprog qssh qtmux qsty qoff
+    local parent_comm="" shlvl=null login_json=false bg_json=false notify_json=false
+    [[ -r /proc/$PPID/comm ]] && { read -r parent_comm < /proc/$PPID/comm } 2>/dev/null
+    [[ ${SHLVL-} == <0-> ]] && shlvl="$SHLVL"
+    [[ -o login ]] && login_json=true
+    (( __zshspy_bg_enabled )) && bg_json=true
+    (( __zshspy_notify_was_on )) && notify_json=true
     __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
     __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
     __zshspy_json_string "$__zshspy_host"; qhost="$__zshspy_r"
     __zshspy_json_string "$__zshspy_user"; quser="$__zshspy_r"
     __zshspy_json_string "$__zshspy_file"; qfile="$__zshspy_r"
     __zshspy_json_string "${ZSH_VERSION:-}"; qzver="$__zshspy_r"
-    local bg_json notify_json
-    (( __zshspy_bg_enabled )) && bg_json=true || bg_json=false
-    (( __zshspy_notify_was_on )) && notify_json=true || notify_json=false
-    __zshspy_write "{\"type\":\"session_start\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"shell_pid\":$__zshspy_shell_pid,\"zsh_version\":$qzver,\"zsh_spy_version\":\"$__zshspy_version\",\"file\":$qfile,\"background_tracking\":$bg_json,\"notify_was_on\":$notify_json}"
+    __zshspy_json_string "${TTY:-}"; qtty="$__zshspy_r"
+    __zshspy_json_string "$parent_comm"; qpcomm="$__zshspy_r"
+    __zshspy_json_string "${TERM:-}"; qterm="$__zshspy_r"
+    __zshspy_json_string "${TERM_PROGRAM:-}"; qtprog="$__zshspy_r"
+    __zshspy_json_string "${SSH_CONNECTION:-}"; qssh="$__zshspy_r"
+    __zshspy_json_string "${TMUX_PANE:-}"; qtmux="$__zshspy_r"
+    __zshspy_json_string "${STY:-}"; qsty="$__zshspy_r"
+    if [[ -n $__zshspy_bg_off_reason ]]; then
+      __zshspy_json_string "$__zshspy_bg_off_reason"; qoff="$__zshspy_r"
+    else
+      qoff=null
+    fi
+    __zshspy_write "{\"type\":\"session_start\",\"schema\":2,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"shell_pid\":$__zshspy_shell_pid,\"ppid\":$PPID,\"parent_comm\":$qpcomm,\"euid\":$EUID,\"login\":$login_json,\"shlvl\":$shlvl,\"tty\":$qtty,\"term\":$qterm,\"term_program\":$qtprog,\"ssh_connection\":$qssh,\"tmux_pane\":$qtmux,\"sty\":$qsty,\"zsh_version\":$qzver,\"zsh_spy_version\":\"$__zshspy_version\",\"file\":$qfile,\"background_tracking\":$bg_json,\"background_tracking_off_reason\":$qoff,\"notify_was_on\":$notify_json}"
   }
 
+  # Emit command_start.  A hidden line (see the header) keeps its metadata
+  # but has every command-text field written as null.
+  #   $1: command id.  $2: typed line.  $3: alias-expanded line.
+  #   $4: single-line, size-limited form.  $5: 1 if the line is hidden.
   __zshspy_log_command_start() {
     emulate -L zsh
     local id="$1" typed="$2" expanded="$3" short="$4"
-    local qid qsession qts qhost quser qcwd qtty qtyped qexpanded qshort
+    local -i hist_hidden="${5:-0}"
+    local qid qsession qts qhost quser qcwd qtty hidden_json=false
+    local qtyped=null qexpanded=null qshort=null
     __zshspy_json_string "$id"; qid="$__zshspy_r"
     __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
     __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
@@ -586,18 +637,30 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_json_string "$__zshspy_user"; quser="$__zshspy_r"
     __zshspy_json_string "$PWD"; qcwd="$__zshspy_r"
     __zshspy_json_string "${TTY:-}"; qtty="$__zshspy_r"
-    __zshspy_json_string "$typed"; qtyped="$__zshspy_r"
-    __zshspy_json_string "$expanded"; qexpanded="$__zshspy_r"
-    __zshspy_json_string "$short"; qshort="$__zshspy_r"
-    __zshspy_write "{\"type\":\"command_start\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"seq\":$__zshspy_seq,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"cwd\":$qcwd,\"tty\":$qtty,\"shell_pid\":$__zshspy_shell_pid,\"histcmd\":${HISTCMD:-0},\"command\":$qtyped,\"command_expanded\":$qexpanded,\"command_short\":$qshort}"
+    if (( hist_hidden )); then
+      hidden_json=true
+    else
+      __zshspy_json_string "$typed"; qtyped="$__zshspy_r"
+      __zshspy_json_string "$expanded"; qexpanded="$__zshspy_r"
+      __zshspy_json_string "$short"; qshort="$__zshspy_r"
+    fi
+    __zshspy_write "{\"type\":\"command_start\",\"schema\":2,\"id\":$qid,\"session_id\":$qsession,\"seq\":$__zshspy_seq,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"host\":$qhost,\"user\":$quser,\"cwd\":$qcwd,\"tty\":$qtty,\"shell_pid\":$__zshspy_shell_pid,\"histcmd\":${HISTCMD:-0},\"hist_hidden\":$hidden_json,\"command\":$qtyped,\"command_expanded\":$qexpanded,\"command_short\":$qshort}"
   }
 
+  # Emit command_end and forget the command's start state.
+  #   $1: command id.  $2: $? of the line.  $3: JSON array of its job slots.
+  #   $4: reason (precmd, zshexit or archive_reloaded).
+  #   $5: $pipestatus joined with commas, or "" when zsh has not updated it
+  #       for this line (the non-precmd reasons); written as null then.
   __zshspy_log_command_end() {
     emulate -L zsh
-    local id="$1" _status="$2" async_jobs_json="$3" reason="${4:-precmd}"
+    local id="$1" _status="$2" async_jobs_json="$3" reason="${4:-precmd}" pipe="${5-}"
     local __zshspy_now_s __zshspy_now_ns __zshspy_now_ts
     __zshspy_now
-    local qid qsession qts qcwd qreason duration_fields
+    local qid qsession qts qcwd qreason duration_fields pipestatus_json=null
+    # $pipestatus is a non-empty array of exit codes, so its joined form is
+    # digits and commas only; anything else is a caller bug, written as null.
+    [[ -n $pipe && $pipe != *[!0-9,]* ]] && pipestatus_json="[$pipe]"
     __zshspy_json_string "$id"; qid="$__zshspy_r"
     __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
     __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
@@ -606,8 +669,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_duration_json_fields "${__zshspy_cmd_start_s[$id]-}" "${__zshspy_cmd_start_ns[$id]-}" "$__zshspy_now_s" "$__zshspy_now_ns"
     duration_fields="$__zshspy_r"
     [[ -z $async_jobs_json ]] && async_jobs_json="[]"
-    __zshspy_write "{\"type\":\"command_end\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"cwd\":$qcwd,\"async_jobs\":$async_jobs_json,\"reason\":$qreason,$duration_fields}"
-    unset "__zshspy_cmd_start_s[$id]" "__zshspy_cmd_start_ns[$id]"
+    __zshspy_write "{\"type\":\"command_end\",\"schema\":2,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"pipestatus\":$pipestatus_json,\"cwd\":$qcwd,\"async_jobs\":$async_jobs_json,\"reason\":$qreason,$duration_fields}"
+    unset "__zshspy_cmd_start_s[$id]" "__zshspy_cmd_start_ns[$id]" "__zshspy_cmd_hidden[$id]"
   }
 
   __zshspy_log_async_start() {
@@ -620,7 +683,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
     __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
     __zshspy_job_summary_fields "$job" "$js"; job_fields="$__zshspy_r"
-    __zshspy_write "{\"type\":\"async_start\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,$job_fields}"
+    __zshspy_write "{\"type\":\"async_start\",\"schema\":2,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,$job_fields}"
   }
 
   __zshspy_log_async_end() {
@@ -645,7 +708,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_job_summary_fields "$job" "$js"; job_fields="$__zshspy_r"
     __zshspy_duration_json_fields "${__zshspy_job_start_s[$job]-}" "${__zshspy_job_start_ns[$job]-}" "$__zshspy_now_s" "$__zshspy_now_ns"
     duration_fields="$__zshspy_r"
-    __zshspy_write "{\"type\":\"async_end\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$status_json,\"status_kind\":\"$status_kind\",$job_fields,$duration_fields}"
+    __zshspy_write "{\"type\":\"async_end\",\"schema\":2,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$status_json,\"status_kind\":\"$status_kind\",$job_fields,$duration_fields}"
   }
 
   __zshspy_log_async_lost() {
@@ -660,7 +723,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_json_string "$reason"; qreason="$__zshspy_r"
     __zshspy_duration_json_fields "${__zshspy_job_start_s[$job]-}" "${__zshspy_job_start_ns[$job]-}" "$__zshspy_now_s" "$__zshspy_now_ns"
     duration_fields="$__zshspy_r"
-    __zshspy_write "{\"type\":\"async_lost\",\"schema\":1,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"job\":$job,\"reason\":$qreason,$duration_fields}"
+    __zshspy_write "{\"type\":\"async_lost\",\"schema\":2,\"id\":$qid,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"job\":$job,\"reason\":$qreason,$duration_fields}"
   }
 
   # Remove one tracked job generation while retaining the logged-done
@@ -672,7 +735,8 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     unset "__zshspy_job_cmd_id[$job]" \
           "__zshspy_job_start_s[$job]" \
           "__zshspy_job_start_ns[$job]" \
-          "__zshspy_job_pids[$job]"
+          "__zshspy_job_pids[$job]" \
+          "__zshspy_job_hidden[$job]"
   }
 
   # Serialize semantic job-table reconciliation.  A CHLD trap can never
@@ -824,6 +888,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
             __zshspy_job_start_s[$job]="${__zshspy_cmd_start_s[$id]-}"
             __zshspy_job_start_ns[$job]="${__zshspy_cmd_start_ns[$id]-}"
             __zshspy_job_pids[$job]="$cur_pids"
+            __zshspy_job_hidden[$job]="${__zshspy_cmd_hidden[$id]:-0}"
             __zshspy_log_async_start "$id" "$job" "$js"
             __zshspy_job_logged_done[$job]="$cur_pids"
             __zshspy_cur_adopted+=( "$job" )
@@ -852,12 +917,20 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     (( __zshspy_seq++ ))
     local id="${__zshspy_session_id}.${__zshspy_seq}"
     local typed="$1" short="$2" expanded="$3"
-    local -i __zshspy_jobs_locked=0
+    local -i __zshspy_jobs_locked=0 hist_hidden=0
     [[ -z $typed ]] && typed="$expanded"
+    # zsh drops this line from history when HIST_IGNORE_SPACE is set and
+    # the typed line, or the line after alias expansion, starts with a
+    # space (hist.c should_ignore_line).  emulate -L without -R leaves that
+    # option as the user set it.
+    if [[ -o histignorespace ]] && [[ $typed == ' '* || $expanded == ' '* ]]; then
+      hist_hidden=1
+    fi
 
     __zshspy_cur_id="$id"
     __zshspy_cmd_start_s[$id]="$__zshspy_now_s"
     __zshspy_cmd_start_ns[$id]="$__zshspy_now_ns"
+    __zshspy_cmd_hidden[$id]="$hist_hidden"
     __zshspy_jobs_before_pids=()
     __zshspy_jobs_before_valid=0
     __zshspy_cur_adopted=()
@@ -873,7 +946,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       fi
       # Keep the semantic lock through command_start so a very fast child
       # cannot produce async_start before its owning command_start record.
-      __zshspy_log_command_start "$id" "$typed" "$expanded" "$short"
+      __zshspy_log_command_start "$id" "$typed" "$expanded" "$short" "$hist_hidden"
     } always {
       (( __zshspy_jobs_locked )) && __zshspy_jobs_unlock
     }
@@ -888,9 +961,10 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
   #   $2: command_end reason (precmd, zshexit, or archive_reloaded).
   #   $3: 1 to permit one final background-job discovery pass after the
   #       finalizing guard has made CHLD reconciliation inert; defaults to 0.
+  #   $4: $pipestatus joined with commas; "" (the default) when unknown.
   # Returns $1.
   __zshspy_finish_current_command() {
-    local last_status="$1" reason="${2:-precmd}"
+    local last_status="$1" reason="${2:-precmd}" pipe="${4-}"
     local -i final_job_pass="${3:-0}"
     emulate -L zsh
     local __zshspy_r __zshspy_r2
@@ -935,6 +1009,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
             __zshspy_job_start_s[$j]="${__zshspy_cmd_start_s[$id]-}"
             __zshspy_job_start_ns[$j]="${__zshspy_cmd_start_ns[$id]-}"
             __zshspy_job_pids[$j]="$current_pids"
+            __zshspy_job_hidden[$j]="${__zshspy_cmd_hidden[$id]:-0}"
             __zshspy_log_async_start "$id" "$j" "$js"
             case "$j" in
               (""|*[!0-9]*)
@@ -956,7 +1031,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
       __zshspy_cur_id=""
       __zshspy_jobs_before_valid=0
       __zshspy_jobs_before_pids=()
-      __zshspy_log_command_end "$id" "$last_status" "$async_jobs_json" "$reason"
+      __zshspy_log_command_end "$id" "$last_status" "$async_jobs_json" "$reason" "$pipe"
       __zshspy_cur_adopted=()
     } always {
       (( __zshspy_jobs_locked )) && __zshspy_jobs_unlock
@@ -964,13 +1039,15 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     return $last_status
   }
 
+  # precmd entry point.  $? and $pipestatus must both be read in this one
+  # statement: the `local` is itself a pipeline and resets them.
   __zshspy_precmd() {
-    local last_status=$?
+    local last_status=$? last_pipestatus="${(j:,:)pipestatus}"
     emulate -L zsh
     local __zshspy_r __zshspy_r2
     (( __zshspy_enabled && ${ZSH_SUBSHELL:-0} == 0 )) || return 0
 
-    __zshspy_finish_current_command "$last_status" "precmd"
+    __zshspy_finish_current_command "$last_status" "precmd" 0 "$last_pipestatus"
     __zshspy_process_done_jobs
     return 0
   }
@@ -987,7 +1064,7 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     __zshspy_json_string "$__zshspy_session_id"; qsession="$__zshspy_r"
     __zshspy_json_string "$__zshspy_now_ts"; qts="$__zshspy_r"
     __zshspy_json_string "$reason"; qreason="$__zshspy_r"
-    __zshspy_write "{\"type\":\"session_end\",\"schema\":1,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"reason\":$qreason}"
+    __zshspy_write "{\"type\":\"session_end\",\"schema\":2,\"session_id\":$qsession,\"ts\":$qts,\"epoch_s\":$__zshspy_now_s,\"epoch_ns\":$__zshspy_now_ns,\"status\":$_status,\"reason\":$qreason}"
   }
 
   # Complete the current command and every tracked job, then make session_end
@@ -1243,25 +1320,33 @@ if [[ -o interactive && ${ZSH_SUBSHELL:-0} == 0 ]]; then
     fi
   fi
 
-  # Enable background tracking only if we have zsh job parameters and no
-  # unchainable pre-existing list-form CHLD trap.
-  if (( __zshspy_enabled && __zshspy_have_jobparams )) && [[ -o monitor ]]; then
-    unfunction __zshspy_user_TRAPCHLD 2>/dev/null || true
-    if (( ${+functions[TRAPCHLD]} )); then
-      if functions -c TRAPCHLD __zshspy_user_TRAPCHLD 2>/dev/null; then
-        __zshspy_chained_user_chld=1
-      else
-        # Never replace a trap we failed to preserve.
-        __zshspy_chld_conflict=1
-      fi
+  # Enable background tracking only with zsh's job parameters, job control
+  # and no unchainable pre-existing list-form CHLD trap; otherwise leave the
+  # reason in __zshspy_bg_off_reason for session_start.
+  if (( __zshspy_enabled )); then
+    if (( ! __zshspy_have_jobparams )); then
+      __zshspy_bg_off_reason="no_job_parameters"
+    elif [[ ! -o monitor ]]; then
+      __zshspy_bg_off_reason="no_monitor"
     else
-      __zshspy_has_list_chld_trap "$__zshspy_dir"
-      case $? in
-        (0|2) __zshspy_chld_conflict=1 ;;
-      esac
+      unfunction __zshspy_user_TRAPCHLD 2>/dev/null || true
+      if (( ${+functions[TRAPCHLD]} )); then
+        if functions -c TRAPCHLD __zshspy_user_TRAPCHLD 2>/dev/null; then
+          __zshspy_chained_user_chld=1
+        else
+          # Never replace a trap we failed to preserve.
+          __zshspy_bg_off_reason="chld_trap_copy_failed"
+        fi
+      else
+        __zshspy_has_list_chld_trap "$__zshspy_dir"
+        case $? in
+          (0) __zshspy_bg_off_reason="list_chld_trap" ;;
+          (2) __zshspy_bg_off_reason="chld_trap_unreadable" ;;
+        esac
+      fi
     fi
 
-    if (( ! __zshspy_chld_conflict )); then
+    if [[ -z $__zshspy_bg_off_reason ]]; then
       __zshspy_bg_enabled=1
       if [[ -o notify ]]; then
         __zshspy_notify_changed=1

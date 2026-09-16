@@ -257,8 +257,8 @@ test_list_trap_conflict() {
     'builtin trap > "$ZSH_SPY_DIR/traps.txt"'
   file="$REPLY"
   zsh_spy_first_record "$file" session_start; ss="$REPLY"
-  [[ $ss == *'"background_tracking":false'* ]]
-  zsh_spy_check $? "t3: session_start reports background_tracking:false"
+  [[ $ss == *'"background_tracking":false,"background_tracking_off_reason":"list_chld_trap"'* ]]
+  zsh_spy_check $? "t3: session_start reports background_tracking:false with reason list_chld_trap"
   grep -q 'trap -- .: user chld. CHLD' "$ZSH_SPY_WORK/t3/traps.txt"
   zsh_spy_check $? "t3: user list trap still installed after source"
 }
@@ -810,6 +810,92 @@ test_session_start_versions() {
   zsh_spy_check $? "t27: zsh_spy_version is the declared version (got '$got', want '$want')"
 }
 
+# T28: command_end.pipestatus carries one exit code per pipeline stage while
+# status stays the last stage's; the zshexit path, where zsh has not
+# refreshed $pipestatus, writes null.
+test_pipestatus() {
+  print -r -- "T28 pipestatus"
+  local file ce
+  zsh_spy_session t28 SOURCE '(exit 5) | (exit 7) | true' '(exit 3)'
+  file="$REPLY"
+  zsh_spy_first_record "$file" command_end '"status":0,"pipestatus":[5,7,0]'
+  zsh_spy_check $? "t28: three-stage pipeline records status 0 with pipestatus [5,7,0]"
+  zsh_spy_first_record "$file" command_end '"status":3,"pipestatus":[3]'
+  zsh_spy_check $? "t28: simple command records a one-element pipestatus"
+  zsh_spy_first_record "$file" command_end '"reason":"zshexit"'; ce="$REPLY"
+  [[ -n $ce && $ce == *'"pipestatus":null'* ]]
+  zsh_spy_check $? "t28: zshexit command_end has pipestatus null"
+}
+
+# T29: session_start provenance matches what the session itself sees, and
+# background_tracking_off_reason is null while tracking is on and names the
+# cause (here: job control off) when it is not.
+test_session_start_provenance() {
+  print -r -- "T29 session_start provenance"
+  local file ss line key got want
+  zsh_spy_session t29 SOURCE \
+    'print -rl -- "ppid=$PPID" "euid=$EUID" "shlvl=$SHLVL" "tty=${TTY:-}" "term=${TERM:-}" "parent_comm=$(</proc/$PPID/comm)" > "$ZSH_SPY_DIR/facts.txt"'
+  file="$REPLY"
+  zsh_spy_first_record "$file" session_start; ss="$REPLY"
+  [[ -n $ss ]]
+  zsh_spy_check $? "t29: session_start recorded"
+  while IFS= read -r line; do
+    key="${line%%=*}"; want="${line#*=}"
+    zsh_spy_field "$ss" "$key"; got="$REPLY"
+    [[ $got == "$want" ]]
+    zsh_spy_check $? "t29: $key matches the session's own value (got '$got', want '$want')"
+  done < "$ZSH_SPY_WORK/t29/facts.txt"
+  [[ $ss == *'"login":false'* ]]
+  zsh_spy_check $? "t29: a non-login shell records login:false"
+  [[ $ss == *'"background_tracking":true,"background_tracking_off_reason":null'* ]]
+  zsh_spy_check $? "t29: off_reason is null while background tracking is on"
+
+  zsh_spy_session t29b 'unsetopt monitor' SOURCE 'echo t29b-ran'
+  file="$REPLY"
+  zsh_spy_first_record "$file" session_start; ss="$REPLY"
+  [[ $ss == *'"background_tracking":false,"background_tracking_off_reason":"no_monitor"'* ]]
+  zsh_spy_check $? "t29: without job control the reason is no_monitor"
+  zsh_spy_first_record "$file" command_end
+  zsh_spy_check $? "t29: commands are still archived without job control"
+}
+
+# T30: with HIST_IGNORE_SPACE, a space-prefixed line is archived with
+# hist_hidden true, null command text and a null job_text for the job it
+# spawns, while its timing and status survive; without the option the same
+# line is archived verbatim.
+test_hist_hidden() {
+  print -r -- "T30 hidden lines"
+  local file cs cs_id ce as
+  zsh_spy_session t30 SOURCE 'setopt histignorespace' \
+    ' echo secret-t30-marker' ' sleep 0.3 &' 'sleep 0.8' 'echo visible-t30'
+  file="$REPLY"
+  ! grep -q 'secret-t30-marker' "$file"
+  zsh_spy_check $? "t30: the hidden line's text is nowhere in the archive"
+  zsh_spy_first_record "$file" command_start \
+    '"hist_hidden":true,"command":null,"command_expanded":null,"command_short":null'
+  cs="$REPLY"
+  [[ -n $cs ]]
+  zsh_spy_check $? "t30: hidden command_start has hist_hidden true and null text"
+  zsh_spy_field "$cs" id; cs_id="$REPLY"
+  zsh_spy_first_record "$file" command_end "\"id\":\"$cs_id\""; ce="$REPLY"
+  [[ -n $ce && $ce == *'"status":0,'* && $ce == *'"duration_s":'* ]]
+  zsh_spy_check $? "t30: hidden command still gets command_end with status and duration"
+  zsh_spy_count_records "$file" command_start '"hist_hidden":true'
+  zsh_spy_check $(( REPLY != 2 )) "t30: both space-prefixed lines are hidden (got $REPLY)"
+  zsh_spy_first_record "$file" async_start '"job_text":null'; as="$REPLY"
+  [[ -n $as && $as == *'"hist_hidden":true'* ]]
+  zsh_spy_check $? "t30: the hidden line's background job has job_text null"
+  zsh_spy_first_record "$file" command_start 'visible-t30'; cs="$REPLY"
+  [[ -n $cs && $cs == *'"hist_hidden":false'* ]]
+  zsh_spy_check $? "t30: an ordinary line keeps its text with hist_hidden false"
+
+  zsh_spy_session t30b SOURCE ' echo spaced-t30-kept'
+  file="$REPLY"
+  zsh_spy_first_record "$file" command_start 'spaced-t30-kept'; cs="$REPLY"
+  [[ -n $cs && $cs == *'"hist_hidden":false'* ]]
+  zsh_spy_check $? "t30: without HIST_IGNORE_SPACE a space-prefixed line is archived verbatim"
+}
+
 # Entry point: run the named tests, or every test, against a scratch dir and
 # report a summary.
 #   $@: test function names to run; empty means all of them.
@@ -852,6 +938,9 @@ main() {
     test_status_decoding
     test_many_jobs
     test_session_start_versions
+    test_pipestatus
+    test_session_start_provenance
+    test_hist_hidden
   )
   local -a tests
   if (( $# )); then
