@@ -4,9 +4,6 @@
 # Only the options below and the sections between "Thoughts for when there is programming involved" and "After making changes" are this project's own; every other section is overwritten.
 
 languages = ["zsh"]
-
-[extra]
-checks = "Run the tests:\n\n\tzsh tests/run.zsh"
 -->
 
 # Environment
@@ -87,6 +84,12 @@ Try writing a function in different ways and see which version is better.
 Sometimes a program can log or assert to generate interesting observations which feed into further development of the program. We do our own science on the outputs later to improve the program.
 
 When there are multiple good ways to implement something, especially involving state or the definition of a type: please ask the user. User loves AskUserQuestion.
+
+# Before committing
+
+Run the tests:
+
+	zsh tests/run.zsh
 
 # After making changes
 
