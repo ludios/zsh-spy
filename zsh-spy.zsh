@@ -1,12 +1,5 @@
 #!/usr/bin/env zsh
 
-# Model-output: ChatGPT 5.2 Thinking
-# Model-output: ChatGPT 5.5 Pro
-# Model-output: ChatGPT 5.6 Sol (Pro)
-# Model-output: Claude Fable 5
-# Model-output: Claude Fable 5.1
-# Model-output: Claude Opus 4.8
-
 # zsh JSONL history archive
 # Install: source this near the end of ~/.zshrc.
 #

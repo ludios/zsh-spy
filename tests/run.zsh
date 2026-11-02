@@ -1,7 +1,5 @@
 #!/usr/bin/env zsh
 
-# Model-output: Claude Fable 5.1
-
 # Test suite for zsh-spy.zsh.
 #
 # Each test drives a real interactive zsh over a pty (zsh/zpty), sources the
